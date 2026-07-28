@@ -133,14 +133,22 @@ Abrir `http://IP_DE_LA_RASPBERRY:8080`.
 ## Activación por etapas
 
 1. Probar la interfaz con sensor y PWM simulados.
-2. Cambiar solo `sensor.backend` a `vernier` y comprobar lecturas por BLE.
-3. Mantener la hornilla desconectada y cambiar solo `pwm.backend` a `gpiozero`.
-4. Medir con multímetro u osciloscopio la salida filtrada para 0, 25, 50, 75 y
+2. Probar el sensor de forma aislada, sin crear GPIO:
+
+   ```bash
+   source .venv/bin/activate
+   python scripts/probar_sensor_vernier.py --samples 10
+   ```
+
+3. Cambiar solo `sensor.backend` a `vernier` y comprobar lecturas por BLE en la
+   interfaz.
+4. Mantener la hornilla desconectada y cambiar solo `pwm.backend` a `gpiozero`.
+5. Medir con multímetro u osciloscopio la salida filtrada para 0, 25, 50, 75 y
    100 %.
-5. Confirmar que 0 % produce 0 V y que al cerrar la aplicación la señal vuelve a
+6. Confirmar que 0 % produce 0 V y que al cerrar la aplicación la señal vuelve a
    0 V.
-6. Conectar el control de fase y limitar inicialmente el duty máximo.
-7. Caracterizar temperatura máxima y ajustar PID con supervisión.
+7. Conectar el control de fase y limitar inicialmente el duty máximo.
+8. Caracterizar temperatura máxima y ajustar PID con supervisión.
 
 GPIO18 admite PWM hardware en Raspberry Pi. La implementación inicial usa
 `PWMOutputDevice` de GPIO Zero; como la señal pasa por un filtro RC de 5.9 Hz,
