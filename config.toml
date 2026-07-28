@@ -1,0 +1,41 @@
+[application]
+host = "0.0.0.0"
+port = 8080
+title = "Control de temperatura PI"
+
+[control]
+sample_period_s = 1.0
+setpoint_initial_c = 40.0
+setpoint_min_c = 0.0
+setpoint_max_c = 300.0
+maximum_safe_temperature_c = 320.0
+ambient_off_tolerance_c = 0.5
+
+[pid]
+kp = 4.0
+ki = 0.20
+kd = 1.0
+output_min_percent = 0.0
+output_max_percent = 100.0
+
+[sensor]
+# "simulated" permite probar sin hardware; cambiar a "vernier" en la Raspberry Pi.
+backend = "simulated"
+connection = "ble"
+sample_period_ms = 1000
+# "native" sirve para el Bluetooth integrado o un adaptador USB gestionado por BlueZ.
+# "bluegiga" queda reservado para el dongle Bluegiga heredado de Vernier.
+ble_backend = "native"
+ble_com_port = ""
+
+[pwm]
+# La salida real solo se crea cuando backend = "gpiozero".
+backend = "simulated"
+bcm_pin = 18
+frequency_hz = 1000.0
+active_high = true
+
+[simulation]
+ambient_temperature_c = 23.0
+heating_rate_c_per_s = 3.5
+cooling_coefficient_per_s = 0.012
