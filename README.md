@@ -38,11 +38,15 @@ físicas independientes.
 
 ## Preparación de Raspberry Pi OS
 
-Los siguientes comandos son una guía; todavía no se han ejecutado:
+El equipo objetivo usa Raspberry Pi OS 13 Trixie de 32 bits, Python 3.13.5 y
+kernel 6.18. La guía detallada está en
+`docs/INSTALACION_RASPBERRY_PI.md`.
+
+Resumen; estos comandos todavía no se han ejecutado:
 
 ```bash
-sudo apt install libusb-1.0-0 libudev-dev python3-venv
-python3 -m venv .venv
+sudo apt install python3-venv python3-dev python3-hid python3-gpiozero python3-rpi.gpio libhidapi-dev libusb-1.0-0 libusb-1.0-0-dev libudev-dev bluetooth bluez build-essential
+python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e .

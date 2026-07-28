@@ -6,11 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "control-temperatura-pi"
 version = "0.1.0"
 description = "Control PID de temperatura para Raspberry Pi y Vernier GDX-TCA"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
-    "godirect>=1.0.6",
-    "gpiozero>=2.0",
-    "nicegui>=3.0",
+    "godirect==1.2.1",
+    "gpiozero==2.0.1",
+    "nicegui==3.15.0",
 ]
 
 [project.scripts]
