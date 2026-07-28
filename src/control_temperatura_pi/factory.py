@@ -24,6 +24,7 @@ def build_controller(config: AppConfig) -> TemperatureController:
                 sample_period_ms=config.sensor.sample_period_ms,
                 ble_backend=config.sensor.ble_backend,
                 ble_com_port=config.sensor.ble_com_port,
+                device_name=config.sensor.device_name,
             )
         else:
             simulation = config.simulation

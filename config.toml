@@ -27,6 +27,7 @@ sample_period_ms = 1000
 # "bluegiga" queda reservado para el dongle Bluegiga heredado de Vernier.
 ble_backend = "native"
 ble_com_port = ""
+device_name = "GDX-TCA 1C1002R9"
 
 [pwm]
 # La salida real solo se crea cuando backend = "gpiozero".

@@ -4,6 +4,19 @@ import time
 from typing import Callable, Protocol
 
 
+def select_device_by_name(devices: list[object], expected_name: str) -> object | None:
+    if not expected_name:
+        return None
+    return next(
+        (
+            device
+            for device in devices
+            if str(getattr(device, "name", "")) == expected_name
+        ),
+        None,
+    )
+
+
 class TemperatureSensor(Protocol):
     def read_temperature_c(self) -> float: ...
 
@@ -48,6 +61,7 @@ class VernierGDXTCASensor:
         sample_period_ms: int,
         ble_backend: str = "native",
         ble_com_port: str = "",
+        device_name: str = "",
     ) -> None:
         try:
             from godirect import GoDirect
@@ -60,10 +74,15 @@ class VernierGDXTCASensor:
             use_ble_bg=connection == "ble" and ble_backend == "bluegiga",
             ble_com_port=ble_com_port or None,
         )
-        self._device = self._godirect.get_device(threshold=-100)
+        if device_name:
+            devices = self._godirect.list_devices()
+            self._device = select_device_by_name(devices, device_name)
+        else:
+            self._device = self._godirect.get_device(threshold=-100)
         if self._device is None:
             self._godirect.quit()
-            raise RuntimeError("No se encontró un sensor Vernier Go Direct")
+            detail = f" con nombre '{device_name}'" if device_name else ""
+            raise RuntimeError(f"No se encontró un sensor Vernier Go Direct{detail}")
         if not self._device.open(auto_start=False):
             self._godirect.quit()
             raise RuntimeError("No fue posible abrir el sensor Vernier")

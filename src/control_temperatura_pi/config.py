@@ -38,6 +38,7 @@ class SensorConfig:
     sample_period_ms: int
     ble_backend: str
     ble_com_port: str
+    device_name: str
 
 
 @dataclass(frozen=True)

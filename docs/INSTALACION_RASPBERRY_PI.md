@@ -5,6 +5,13 @@ Entorno identificado:
 - Raspberry Pi OS 13 `trixie`, 32 bits.
 - Python 3.13.5.
 - Kernel 6.18 para Raspberry Pi, arquitectura `armv7l`.
+- Adaptador BLE USB Cypress CYW20704A2 (`04b4:f901`).
+- El adaptador USB aparece actualmente como `hci0`, dirección
+  `00:16:A4:D7:2E:DF`, y es el controlador predeterminado.
+- El Bluetooth interno aparece como `hci1`, dirección
+  `B8:27:EB:9E:8B:BE`.
+- Sensor autorizado: `GDX-TCA 1C1002R9`.
+- Dirección BLE observada: `3C:2E:F5:62:94:79`.
 
 ## Razón del procedimiento
 
@@ -58,6 +65,50 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
 El diagnóstico no crea la salida PWM ni energiza la carga.
+
+## Bluetooth Vernier
+
+El adaptador Cypress es un controlador BLE genérico administrado por BlueZ. Debe
+usarse:
+
+```toml
+[sensor]
+connection = "ble"
+ble_backend = "native"
+device_name = "GDX-TCA 1C1002R9"
+```
+
+No instalar `vernierpygatt`: ese paquete solo corresponde al dongle Bluegiga
+heredado.
+
+En el diagnóstico inicial, tanto `hci0` como `hci1` aparecieron bloqueados por
+software. Antes de buscar el GDX-TCA:
+
+```bash
+sudo rfkill unblock bluetooth
+bluetoothctl list
+bluetoothctl show 00:16:A4:D7:2E:DF
+rfkill list bluetooth
+```
+
+El adaptador USB debe mostrar `Powered: yes` y `Soft blocked: no`. Si permanece
+apagado:
+
+```bash
+bluetoothctl
+select 00:16:A4:D7:2E:DF
+power on
+quit
+```
+
+El backend actual de `godirect` utiliza Bleak/BlueZ y no expone una opción para
+fijar explícitamente `hci0`. En este equipo no es necesario porque el Cypress es
+`hci0` y está marcado como controlador predeterminado. Debe volver a verificarse
+después de reinicios o cambios de adaptadores USB.
+
+La aplicación no utiliza emparejamiento por proximidad cuando `device_name` está
+configurado. Escanea los Go Direct disponibles y solo abre el nombre exacto
+`GDX-TCA 1C1002R9`; si no aparece, mantiene el PWM apagado y reporta un fallo.
 
 ## Prueba inicial
 

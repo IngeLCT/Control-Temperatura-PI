@@ -118,6 +118,14 @@ El Bluetooth USB genérico administrado por BlueZ usa `ble_backend = "native"`.
 Solo debe elegirse `bluegiga` si el adaptador es específicamente un dongle
 Bluegiga compatible con el backend heredado de Vernier.
 
+El equipo objetivo ya fue identificado con un Cypress CYW20704A2 USB
+(`04b4:f901`), administrado por BlueZ como `hci0`. La guía de instalación incluye
+los pasos para retirar el bloqueo de software antes de buscar el sensor.
+
+El sensor autorizado es `GDX-TCA 1C1002R9`, observado en la dirección BLE
+`3C:2E:F5:62:94:79`. La aplicación exige coincidencia exacta del nombre y no se
+conecta automáticamente a otro Go Direct más cercano.
+
 ## Ajuste PID
 
 Los valores iniciales de `kp`, `ki` y `kd` son únicamente conservadores para el
