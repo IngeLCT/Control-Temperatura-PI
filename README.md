@@ -118,8 +118,8 @@ el comportamiento real deberá caracterizarse y ajustarse en el equipo.
 
 El script aislado `scripts/probar_control_fase.py` ofrece un slider de 0 a 100 %
 sin crear el sensor ni ejecutar el PID. Inicia siempre con salida 0 %, exige
-habilitación manual, incluye botón de paro y apaga la salida después de 30
-segundos sin mover el slider o el interruptor.
+habilitación manual, incluye botón de paro y apaga la salida si el navegador se
+desconecta.
 
 Primero se puede comprobar la interfaz con PWM simulado:
 
@@ -134,9 +134,7 @@ python scripts/probar_control_fase.py --real
 ```
 
 La interfaz queda en `http://IP_DE_LA_RASPBERRY:8081`. Para limitar una primera
-prueba, por ejemplo a 25 %, usar `--max-duty 25`. El watchdog puede ajustarse con
-`--watchdog SEGUNDOS`; usar `0` lo deshabilita y no se recomienda con una carga
-conectada.
+prueba, por ejemplo a 25 %, usar `--max-duty 25`.
 
 El Bluetooth USB genérico administrado por BlueZ usa `ble_backend = "native"`.
 Solo debe elegirse `bluegiga` si el adaptador es específicamente un dongle

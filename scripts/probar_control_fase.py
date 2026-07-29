@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import threading
-import time
 
 from control_temperatura_pi.pwm import GPIOZeroPWMOutput, SimulatedPWMOutput
 
@@ -31,12 +30,6 @@ def parse_args() -> argparse.Namespace:
         default=100.0,
         help="Límite superior del slider, entre 1 y 100 %%",
     )
-    parser.add_argument(
-        "--watchdog",
-        type=float,
-        default=30.0,
-        help="Segundos de inactividad antes de apagar; 0 deshabilita el watchdog",
-    )
     parser.add_argument("--host", default="0.0.0.0", help="Dirección de escucha")
     parser.add_argument("--port", type=int, default=8081, help="Puerto web")
     return parser.parse_args()
@@ -49,8 +42,6 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--frequency debe ser mayor que cero")
     if not 1.0 <= args.max_duty <= 100.0:
         raise SystemExit("--max-duty debe estar entre 1 y 100")
-    if args.watchdog < 0:
-        raise SystemExit("--watchdog no puede ser negativo")
     if not 1 <= args.port <= 65535:
         raise SystemExit("--port debe estar entre 1 y 65535")
 
@@ -73,23 +64,20 @@ def main() -> None:
     lock = threading.Lock()
     enabled = False
     requested_duty = 0.0
-    last_activity = time.monotonic()
 
     def set_output(duty_percent: float) -> float:
-        nonlocal requested_duty, last_activity
+        nonlocal requested_duty
         with lock:
             requested_duty = min(args.max_duty, max(0.0, duty_percent))
-            last_activity = time.monotonic()
             applied = requested_duty if enabled else 0.0
             pwm.set_duty_percent(applied)
             return applied
 
     def disable_output() -> None:
-        nonlocal enabled, requested_duty, last_activity
+        nonlocal enabled, requested_duty
         with lock:
             enabled = False
             requested_duty = 0.0
-            last_activity = time.monotonic()
             pwm.set_duty_percent(0.0)
 
     def close_output() -> None:
@@ -100,7 +88,7 @@ def main() -> None:
 
     @ui.page("/")
     def index() -> None:
-        nonlocal enabled, last_activity
+        nonlocal enabled
         client = ui.context.client
 
         ui.label("Prueba manual del control de fase").classes("text-h4 font-bold")
@@ -131,7 +119,6 @@ def main() -> None:
             status_label = ui.label("SALIDA APAGADA").classes(
                 "text-h6 font-bold text-positive"
             )
-            watchdog_label = ui.label("")
 
             def update_labels(applied: float) -> None:
                 duty_label.set_text(f"{applied:.1f} %")
@@ -144,9 +131,8 @@ def main() -> None:
                 update_labels(applied)
 
             def change_enabled(event) -> None:
-                nonlocal enabled, last_activity
+                nonlocal enabled
                 enabled = bool(event.value)
-                last_activity = time.monotonic()
                 if enabled:
                     slider.enable()
                     applied = set_output(float(slider.value))
@@ -181,27 +167,8 @@ def main() -> None:
                 color="negative",
             ).classes("w-full text-h6")
 
-            def refresh_watchdog() -> None:
-                if args.watchdog == 0:
-                    watchdog_label.set_text("Watchdog deshabilitado")
-                    return
-                remaining = max(
-                    0.0, args.watchdog - (time.monotonic() - last_activity)
-                )
-                watchdog_label.set_text(
-                    f"Apagado por inactividad en {remaining:.0f} s"
-                    if enabled
-                    else f"Watchdog: {args.watchdog:g} s"
-                )
-                if enabled and remaining <= 0.0:
-                    emergency_stop()
-                    status_label.set_text("WATCHDOG · SALIDA FORZADA A 0 %")
-
-            watchdog_timer = ui.timer(0.5, refresh_watchdog)
-
             def disconnect_client() -> None:
                 disable_output()
-                watchdog_timer.cancel(with_current_invocation=True)
 
             client.on_disconnect(disconnect_client)
 
