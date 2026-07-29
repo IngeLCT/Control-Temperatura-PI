@@ -3,7 +3,11 @@ from __future__ import annotations
 import argparse
 import threading
 
-from control_temperatura_pi.pwm import GPIOZeroPWMOutput, SimulatedPWMOutput
+from control_temperatura_pi.pwm import (
+    GPIOZeroPWMOutput,
+    SimulatedPWMOutput,
+    logical_to_physical_duty,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,6 +34,12 @@ def parse_args() -> argparse.Namespace:
         default=100.0,
         help="Límite superior del slider, entre 1 y 100 %%",
     )
+    parser.add_argument(
+        "--active-ceiling",
+        type=float,
+        default=80.0,
+        help="Duty físico donde comienza la zona activa, entre 0 y 100 %%",
+    )
     parser.add_argument("--host", default="0.0.0.0", help="Dirección de escucha")
     parser.add_argument("--port", type=int, default=8081, help="Puerto web")
     return parser.parse_args()
@@ -42,6 +52,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--frequency debe ser mayor que cero")
     if not 1.0 <= args.max_duty <= 100.0:
         raise SystemExit("--max-duty debe estar entre 1 y 100")
+    if not 0.0 < args.active_ceiling < 100.0:
+        raise SystemExit("--active-ceiling debe estar entre 0 y 100")
     if not 1 <= args.port <= 65535:
         raise SystemExit("--port debe estar entre 1 y 65535")
 
@@ -57,6 +69,7 @@ def main() -> None:
             bcm_pin=args.pin,
             frequency_hz=args.frequency,
             active_high=True,
+            active_duty_ceiling_percent=args.active_ceiling,
         )
         if args.real
         else SimulatedPWMOutput()
@@ -102,9 +115,12 @@ def main() -> None:
         ).classes("text-subtitle1")
 
         with ui.card().classes("w-full max-w-2xl"):
-            ui.label("Duty PWM solicitado").classes("text-subtitle2")
+            ui.label("Demanda térmica solicitada").classes("text-subtitle2")
             duty_label = ui.label("0.0 %").classes("text-h3")
-            voltage_label = ui.label("Referencia estimada: 0.00 V").classes(
+            physical_label = ui.label("PWM físico: 100.0 %").classes(
+                "text-subtitle1"
+            )
+            voltage_label = ui.label("Referencia estimada: 3.30 V").classes(
                 "text-subtitle1"
             )
             slider = ui.slider(
@@ -120,10 +136,16 @@ def main() -> None:
                 "text-h6 font-bold text-positive"
             )
 
-            def update_labels(applied: float) -> None:
-                duty_label.set_text(f"{applied:.1f} %")
+            def update_labels(logical_duty: float) -> None:
+                physical_duty = logical_to_physical_duty(
+                    logical_duty,
+                    args.active_ceiling,
+                )
+                duty_label.set_text(f"{logical_duty:.1f} %")
+                physical_label.set_text(f"PWM físico: {physical_duty:.1f} %")
                 voltage_label.set_text(
-                    f"Referencia estimada: {3.3 * applied / 100.0:.2f} V"
+                    f"Referencia estimada: "
+                    f"{3.3 * physical_duty / 100.0:.2f} V"
                 )
 
             def change_duty(event) -> None:
@@ -173,7 +195,7 @@ def main() -> None:
             client.on_disconnect(disconnect_client)
 
         ui.label(
-            "El voltaje mostrado es una estimación ideal de 3.3 V × duty. "
+            "El voltaje mostrado es una estimación ideal del PWM físico. "
             "Confirma el valor real con multímetro."
         ).classes("text-caption text-grey-7")
 

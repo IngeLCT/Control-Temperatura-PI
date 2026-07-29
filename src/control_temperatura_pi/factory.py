@@ -13,6 +13,9 @@ def build_controller(config: AppConfig) -> TemperatureController:
             bcm_pin=config.pwm.bcm_pin,
             frequency_hz=config.pwm.frequency_hz,
             active_high=config.pwm.active_high,
+            active_duty_ceiling_percent=(
+                config.pwm.active_duty_ceiling_percent
+            ),
         )
     else:
         pwm = SimulatedPWMOutput()

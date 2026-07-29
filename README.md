@@ -9,8 +9,9 @@ sensor y porcentaje de salida.
 
 - Modo simulado activado de fábrica.
 - Control PID con salida limitada entre 0 y 100 %.
-- Salida apagada al iniciar, al detener el control, ante pérdida de lectura y por
-  sobretemperatura.
+- Salida física al 100 % (aproximadamente 3.3 V) al iniciar, detener el control,
+  perder la lectura o detectar sobretemperatura; en la etapa invertida esto
+  corresponde a potencia térmica apagada.
 - Slider desde la temperatura ambiente inicial hasta 300 °C.
 - En el extremo de temperatura ambiente, la referencia fuerza una salida de 0 %.
 - Corte lógico provisional a 320 °C, pendiente de la caracterización térmica.
@@ -88,6 +89,8 @@ ble_backend = "native"
 [pwm]
 backend = "gpiozero"
 bcm_pin = 18
+active_high = true
+active_duty_ceiling_percent = 80.0
 ```
 
 No conectar una resistencia calefactora directamente al GPIO. Se necesita una
@@ -100,26 +103,34 @@ carga.
 
 La salida GPIO18 no gobierna directamente el BTA08-600B. Genera PWM de 1 kHz y
 el filtro de 27 kΩ + 1 µF lo convierte en una referencia aproximada de 0 a 3.3 V
-aplicada entre `SP` y `GND` del controlador de fase ya probado.
+aplicada entre `SP` y `GND` del controlador de fase ya probado. La etapa medida
+es inversa: menor voltaje significa mayor potencia.
 
 - Constante de tiempo RC: 27 ms.
 - Frecuencia de corte aproximada: 5.9 Hz.
 - Tiempo de establecimiento aproximado a 1 %: 124 ms.
-- 0 % PWM equivale a 0 V y hornilla apagada.
-- 100 % PWM equivale aproximadamente a 3.3 V y máxima potencia.
+- 0 % de demanda térmica equivale a 100 % PWM físico, aproximadamente 3.3 V y
+  carga apagada.
+- 100 % de demanda térmica equivale a 0 % PWM físico, 0 V y máxima potencia.
+- El controlador de fase apaga la carga desde aproximadamente 2.64 V, equivalente
+  a 80 % PWM físico.
+- Para eliminar ese rango muerto, cualquier demanda térmica positiva se escala
+  desde 80 % hasta 0 % PWM físico. Por ello hay un salto deliberado: 0 % lógico
+  usa 100 % físico; 1 % lógico usa aproximadamente 79.2 % físico.
 - Carga informada: hornilla de 120 VAC y 5 A.
 - Dispositivo de potencia: BTA08-600B en M1, M2 y G.
 
 La potencia de un control por ángulo de fase no necesariamente es lineal respecto
-al voltaje `SP`. Por ello el PID mandará una orden normalizada de 0 a 100 %, pero
-el comportamiento real deberá caracterizarse y ajustarse en el equipo.
+al voltaje `SP`. El PID manda una demanda térmica normalizada de 0 a 100 % y la
+capa GPIO realiza la inversión y compensación del rango muerto. El comportamiento
+real deberá caracterizarse y ajustarse en el equipo.
 
 ### Prueba manual del control de fase sin sensor
 
 El script aislado `scripts/probar_control_fase.py` ofrece un slider de 0 a 100 %
-sin crear el sensor ni ejecutar el PID. Inicia siempre con salida 0 %, exige
-habilitación manual, incluye botón de paro y apaga la salida si el navegador se
-desconecta.
+sin crear el sensor ni ejecutar el PID. Inicia siempre con demanda térmica 0 % y
+PWM físico 100 %, exige habilitación manual, incluye botón de paro y apaga la
+salida si el navegador se desconecta.
 
 Primero se puede comprobar la interfaz con PWM simulado:
 
@@ -135,6 +146,23 @@ python scripts/probar_control_fase.py --real
 
 La interfaz queda en `http://IP_DE_LA_RASPBERRY:8081`. Para limitar una primera
 prueba, por ejemplo a 25 %, usar `--max-duty 25`.
+
+Si el entorno virtual no puede usar el controlador GPIO instalado por el sistema,
+existe una prueba autónoma sin NiceGUI ni gpiozero:
+
+```bash
+sudo /usr/bin/python3 scripts/probar_control_fase_sistema.py
+```
+
+Este script utiliza directamente `RPi.GPIO` y un servidor HTTP de la biblioteca
+estándar de Python. También inicia y termina con demanda térmica 0 % y PWM físico
+100 %, ofrece habilitación manual y botón de paro, y sirve la interfaz en el
+puerto 8081.
+
+Como 0 V representa máxima potencia, el apagado no debe depender solo del
+software. La entrada `SP` debe tener un estado físico de fallo seguro que la
+mantenga en el nivel de apagado si la Raspberry se reinicia, pierde alimentación
+o libera GPIO18, además de fusible térmico e interbloqueo independientes.
 
 El Bluetooth USB genérico administrado por BlueZ usa `ble_backend = "native"`.
 Solo debe elegirse `bluegiga` si el adaptador es específicamente un dongle

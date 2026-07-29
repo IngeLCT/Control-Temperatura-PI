@@ -47,6 +47,7 @@ class PwmConfig:
     bcm_pin: int
     frequency_hz: float
     active_high: bool
+    active_duty_ceiling_percent: float
 
 
 @dataclass(frozen=True)
@@ -106,3 +107,11 @@ def _validate(config: AppConfig) -> None:
         raise ValueError("sensor.ble_backend debe ser 'native' o 'bluegiga'")
     if config.pwm.backend not in {"simulated", "gpiozero"}:
         raise ValueError("pwm.backend debe ser 'simulated' o 'gpiozero'")
+    if not config.pwm.active_high:
+        raise ValueError(
+            "La etapa invertida requiere pwm.active_high = true"
+        )
+    if not 0 < config.pwm.active_duty_ceiling_percent < 100:
+        raise ValueError(
+            "pwm.active_duty_ceiling_percent debe estar entre 0 y 100"
+        )

@@ -145,8 +145,11 @@ Abrir `http://IP_DE_LA_RASPBERRY:8080`.
 4. Mantener la hornilla desconectada y cambiar solo `pwm.backend` a `gpiozero`.
 5. Medir con multímetro u osciloscopio la salida filtrada para 0, 25, 50, 75 y
    100 %.
-6. Confirmar que 0 % produce 0 V y que al cerrar la aplicación la señal vuelve a
-   0 V.
+6. Confirmar que 0 % de demanda térmica produce aproximadamente 3.3 V, que 100 %
+   produce aproximadamente 0 V y que al cerrar la aplicación la señal vuelve a
+   3.3 V, correspondiente al apagado de la etapa invertida.
+   Valores ideales intermedios: 25 % lógico ≈ 1.98 V, 50 % ≈ 1.32 V y 75 %
+   ≈ 0.66 V.
 7. Conectar el control de fase y limitar inicialmente el duty máximo.
 8. Caracterizar temperatura máxima y ajustar PID con supervisión.
 
@@ -155,3 +158,8 @@ GPIO18 admite PWM hardware en Raspberry Pi. La implementación inicial usa
 el PWM de 1 kHz no exige la misma precisión temporal que un disparo de TRIAC
 directo. No se instalará `pigpio` desde fuentes salvo que una medición demuestre
 que el backend incluido no es suficientemente estable.
+
+Debido a que 0 V ordena máxima potencia, se requiere un estado físico de fallo
+seguro en `SP` que mantenga el apagado durante arranque, reinicio, pérdida de
+alimentación o liberación del GPIO. El apagado por software no sustituye fusible
+térmico, termostato o interbloqueo independiente.

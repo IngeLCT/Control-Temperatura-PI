@@ -35,6 +35,9 @@ backend = "simulated"
 bcm_pin = 18
 frequency_hz = 1000.0
 active_high = true
+# El control de fase se apaga desde aproximadamente 2.64 V (80 % físico).
+# La demanda lógica se invierte: 0 % = 100 % físico; 100 % = 0 % físico.
+active_duty_ceiling_percent = 80.0
 
 [simulation]
 ambient_temperature_c = 23.0

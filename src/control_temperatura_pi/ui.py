@@ -25,7 +25,7 @@ def run_ui(controller: TemperatureController, config: AppConfig) -> None:
                 ui.label("Temperatura actual").classes("text-subtitle2")
                 temperature_label = ui.label("--.- °C").classes("text-h3")
             with ui.card().classes("min-w-64"):
-                ui.label("Salida PWM").classes("text-subtitle2")
+                ui.label("Demanda térmica").classes("text-subtitle2")
                 duty_label = ui.label("0.0 %").classes("text-h3")
             with ui.card().classes("min-w-64"):
                 ui.label("Temperatura ambiente inicial").classes("text-subtitle2")
