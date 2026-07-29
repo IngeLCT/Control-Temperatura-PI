@@ -101,6 +101,7 @@ def main() -> None:
     @ui.page("/")
     def index() -> None:
         nonlocal enabled, last_activity
+        client = ui.context.client
 
         ui.label("Prueba manual del control de fase").classes("text-h4 font-bold")
         mode = "GPIO REAL" if args.real else "SIMULACIÓN"
@@ -196,7 +197,13 @@ def main() -> None:
                     emergency_stop()
                     status_label.set_text("WATCHDOG · SALIDA FORZADA A 0 %")
 
-            ui.timer(0.5, refresh_watchdog)
+            watchdog_timer = ui.timer(0.5, refresh_watchdog)
+
+            def disconnect_client() -> None:
+                disable_output()
+                watchdog_timer.cancel(with_current_invocation=True)
+
+            client.on_disconnect(disconnect_client)
 
         ui.label(
             "El voltaje mostrado es una estimación ideal de 3.3 V × duty. "
