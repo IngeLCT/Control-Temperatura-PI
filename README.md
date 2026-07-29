@@ -114,6 +114,30 @@ La potencia de un control por ángulo de fase no necesariamente es lineal respec
 al voltaje `SP`. Por ello el PID mandará una orden normalizada de 0 a 100 %, pero
 el comportamiento real deberá caracterizarse y ajustarse en el equipo.
 
+### Prueba manual del control de fase sin sensor
+
+El script aislado `scripts/probar_control_fase.py` ofrece un slider de 0 a 100 %
+sin crear el sensor ni ejecutar el PID. Inicia siempre con salida 0 %, exige
+habilitación manual, incluye botón de paro y apaga la salida después de 30
+segundos sin mover el slider o el interruptor.
+
+Primero se puede comprobar la interfaz con PWM simulado:
+
+```bash
+python scripts/probar_control_fase.py
+```
+
+Para probar GPIO18 con la hornilla desconectada y medir `SP` respecto a `GND`:
+
+```bash
+python scripts/probar_control_fase.py --real
+```
+
+La interfaz queda en `http://IP_DE_LA_RASPBERRY:8081`. Para limitar una primera
+prueba, por ejemplo a 25 %, usar `--max-duty 25`. El watchdog puede ajustarse con
+`--watchdog SEGUNDOS`; usar `0` lo deshabilita y no se recomienda con una carga
+conectada.
+
 El Bluetooth USB genérico administrado por BlueZ usa `ble_backend = "native"`.
 Solo debe elegirse `bluegiga` si el adaptador es específicamente un dongle
 Bluegiga compatible con el backend heredado de Vernier.
