@@ -195,10 +195,10 @@ Fuera de la prueba controlada, la salida manual conserva el apagado de seguridad
 cuando se desconecta el último navegador.
 
 La pantalla agrupa temperatura, voltaje, corriente y potencia activa en una
-tarjeta superior. Los controles de sensores, tiempos,
-paso PWM y CSV están en una segunda tarjeta. El control PWM y la gráfica
-`Temperatura vs tiempo` aparecen lado a lado. La gráfica se limpia y comienza
-solo cuando inicia un registro manual o una prueba controlada.
+tarjeta superior. Debajo aparecen lado a lado el control PWM y la gráfica
+`Temperatura vs tiempo`. La tarjeta con los controles de sensores, tiempos,
+paso PWM, prueba controlada y CSV queda debajo de ambos. La gráfica se limpia
+y comienza solo cuando inicia un registro manual o una prueba controlada.
 
 Si cambia la dirección del medidor, se puede indicar otro endpoint:
 

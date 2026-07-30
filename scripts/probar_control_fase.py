@@ -1165,6 +1165,7 @@ def main() -> None:
                 "manual o una prueba controlada."
             ).classes("text-caption text-grey-7")
         chart_card.move(main_cards)
+        controls_card.move()
 
         with ui_clients_lock:
             ui_clients[client.id] = (client, temperature_chart)
