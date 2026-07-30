@@ -18,6 +18,15 @@ from control_temperatura_pi.sensors import VernierGDXTCASensor
 from control_temperatura_pi.sensorwatts import SensorWattsClient
 
 
+def describe_error(error: Exception) -> str:
+    message = str(error).strip()
+    return (
+        f"{type(error).__name__}: {message}"
+        if message
+        else type(error).__name__
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -108,6 +117,16 @@ def main() -> None:
     sensor_error: str | None = None
     sensor_last_read = 0.0
     sensor_connecting = False
+    sensor_view = {
+        "temperature": "--.- °C",
+        "status": (
+            "SENSOR DESCONECTADO"
+            if args.sensor
+            else "SENSOR NO HABILITADO · USA --sensor"
+        ),
+        "button": "CONECTAR SENSOR DE TEMPERATURA",
+        "button_enabled": args.sensor,
+    }
 
     pwm = (
         GPIOZeroPWMOutput(
@@ -143,6 +162,9 @@ def main() -> None:
                 sensor = created_sensor
                 sensor_connecting = False
                 sensor_error = None
+                sensor_view["status"] = "ESPERANDO PRIMERA LECTURA..."
+                sensor_view["button"] = "SENSOR CONECTADO"
+                sensor_view["button_enabled"] = False
             while not sensor_stop.is_set():
                 try:
                     temperature = created_sensor.read_temperature_c()
@@ -150,15 +172,23 @@ def main() -> None:
                         sensor_temperature_c = temperature
                         sensor_error = None
                         sensor_last_read = time.monotonic()
+                        sensor_view["temperature"] = f"{temperature:.1f} °C"
+                        sensor_view["status"] = "SENSOR CONECTADO"
                 except Exception as error:
                     with sensor_lock:
-                        sensor_error = str(error)
+                        sensor_error = describe_error(error)
+                        sensor_view["status"] = (
+                            f"ERROR DEL SENSOR: {sensor_error}"
+                        )
                     if sensor_stop.wait(0.5):
                         break
         except Exception as error:
             with sensor_lock:
                 sensor_connecting = False
-                sensor_error = str(error)
+                sensor_error = describe_error(error)
+                sensor_view["status"] = f"ERROR DEL SENSOR: {sensor_error}"
+                sensor_view["button"] = "REINTENTAR CONEXIÓN"
+                sensor_view["button_enabled"] = True
         finally:
             if created_sensor is not None:
                 created_sensor.close()
@@ -177,10 +207,21 @@ def main() -> None:
     sensorwatts_reading = None
     sensorwatts_error: str | None = None
     sensorwatts_last_read = 0.0
+    sensorwatts_view = {
+        "voltage": "--.-- V",
+        "current": "--.--- A",
+        "power_factor": "-.----",
+        "active_power": "--.-- W",
+        "status": f"CONECTANDO A {args.sensorwatts_url}...",
+    }
     recording_lock = threading.Lock()
     recording = False
     recording_started = 0.0
     recorded_rows: list[dict[str, object]] = []
+    recording_view = {
+        "status": "REGISTRO DETENIDO · 0 MUESTRAS",
+        "button": "INICIAR REGISTRO CSV",
+    }
     csv_fields = [
         "FechaHora",
         "Tiempo_s",
@@ -239,6 +280,10 @@ def main() -> None:
                     "Potencia_Activa_W": f"{reading.active_power_w:.2f}",
                 }
             )
+            recording_view["status"] = (
+                f"REGISTRANDO · {len(recorded_rows)} MUESTRAS · "
+                f"{elapsed_s:.0f} s"
+            )
 
     def read_sensorwatts() -> None:
         nonlocal sensorwatts_reading, sensorwatts_error, sensorwatts_last_read
@@ -249,10 +294,26 @@ def main() -> None:
                     sensorwatts_reading = reading
                     sensorwatts_error = None
                     sensorwatts_last_read = time.monotonic()
+                    sensorwatts_view["voltage"] = (
+                        f"{reading.voltage_v:.2f} V"
+                    )
+                    sensorwatts_view["current"] = (
+                        f"{reading.current_a:.3f} A"
+                    )
+                    sensorwatts_view["power_factor"] = (
+                        f"{reading.power_factor:.4f}"
+                    )
+                    sensorwatts_view["active_power"] = (
+                        f"{reading.active_power_w:.2f} W"
+                    )
+                    sensorwatts_view["status"] = "SENSORWATTS CONECTADO"
                 append_record(reading)
             except Exception as error:
                 with sensorwatts_lock:
-                    sensorwatts_error = str(error)
+                    sensorwatts_error = describe_error(error)
+                    sensorwatts_view["status"] = (
+                        f"ERROR SENSORWATTS: {sensorwatts_error}"
+                    )
             if sensorwatts_stop.wait(1.0):
                 break
 
@@ -278,7 +339,6 @@ def main() -> None:
     def index() -> None:
         nonlocal enabled
         client = ui.context.client
-        client_timers = []
 
         ui.label("Prueba manual del control de fase").classes("text-h4 font-bold")
         mode = "GPIO REAL" if args.real else "SIMULACIÓN"
@@ -293,11 +353,13 @@ def main() -> None:
 
         with ui.card().classes("w-full max-w-2xl"):
             ui.label("Temperatura de referencia").classes("text-subtitle2")
-            temperature_label = ui.label("--.- °C").classes("text-h3")
-            sensor_status_label = ui.label(
-                "SENSOR DESCONECTADO"
-                if args.sensor
-                else "SENSOR NO HABILITADO"
+            ui.label().bind_text_from(
+                sensor_view,
+                "temperature",
+            ).classes("text-h3")
+            ui.label().bind_text_from(
+                sensor_view,
+                "status",
             ).classes("text-subtitle1 text-grey-7")
             ui.label(
                 "Esta lectura no modifica la demanda térmica ni la salida PWM."
@@ -318,8 +380,10 @@ def main() -> None:
                     sensor_connecting = True
                     sensor_temperature_c = None
                     sensor_error = None
-                sensor_button.disable()
-                sensor_button.set_text("CONECTANDO...")
+                    sensor_view["temperature"] = "--.- °C"
+                    sensor_view["status"] = "CONECTANDO SENSOR..."
+                    sensor_view["button"] = "CONECTANDO..."
+                    sensor_view["button_enabled"] = False
                 sensor_thread = threading.Thread(
                     target=connect_and_read_sensor,
                     name="vernier-temperature-reference",
@@ -328,71 +392,14 @@ def main() -> None:
                 sensor_thread.start()
 
             sensor_button = ui.button(
-                "CONECTAR SENSOR DE TEMPERATURA",
                 on_click=start_sensor_connection,
+            ).bind_text_from(
+                sensor_view,
+                "button",
+            ).bind_enabled_from(
+                sensor_view,
+                "button_enabled",
             ).classes("w-full")
-            if not args.sensor:
-                sensor_button.disable()
-
-            def update_temperature() -> None:
-                with sensor_lock:
-                    temperature = sensor_temperature_c
-                    error = sensor_error
-                    last_read = sensor_last_read
-                    connecting = sensor_connecting
-                    connected = sensor is not None
-                if not args.sensor:
-                    sensor_status_label.set_text(
-                        "SENSOR NO HABILITADO · USA --sensor"
-                    )
-                    return
-                if connecting:
-                    sensor_button.disable()
-                    sensor_button.set_text("CONECTANDO...")
-                    sensor_status_label.set_text("CONECTANDO SENSOR...")
-                    sensor_status_label.classes(
-                        replace="text-subtitle1 text-primary"
-                    )
-                    return
-                if error is not None:
-                    sensor_status_label.set_text(f"ERROR DEL SENSOR: {error}")
-                    sensor_status_label.classes(
-                        replace="text-subtitle1 text-negative"
-                    )
-                    if not connected:
-                        sensor_button.enable()
-                        sensor_button.set_text("REINTENTAR CONEXIÓN")
-                    return
-                if temperature is None:
-                    sensor_status_label.set_text(
-                        "SENSOR DESCONECTADO"
-                        if not connected
-                        else "ESPERANDO PRIMERA LECTURA..."
-                    )
-                    if not connected:
-                        sensor_button.enable()
-                        sensor_button.set_text(
-                            "CONECTAR SENSOR DE TEMPERATURA"
-                        )
-                    return
-                temperature_label.set_text(f"{temperature:.1f} °C")
-                sensor_button.disable()
-                sensor_button.set_text("SENSOR CONECTADO")
-                age_s = time.monotonic() - last_read
-                if age_s > 3.0:
-                    sensor_status_label.set_text(
-                        f"LECTURA SIN ACTUALIZAR · {age_s:.1f} s"
-                    )
-                    sensor_status_label.classes(
-                        replace="text-subtitle1 text-warning"
-                    )
-                else:
-                    sensor_status_label.set_text("SENSOR CONECTADO")
-                    sensor_status_label.classes(
-                        replace="text-subtitle1 text-positive"
-                    )
-
-            client_timers.append(ui.timer(0.5, update_temperature))
 
         with ui.card().classes("w-full max-w-2xl"):
             ui.label("Demanda térmica solicitada").classes("text-subtitle2")
@@ -471,8 +478,6 @@ def main() -> None:
 
             def disconnect_client() -> None:
                 disable_output()
-                for timer in client_timers:
-                    timer.cancel(with_current_invocation=True)
 
             client.on_disconnect(disconnect_client)
 
@@ -481,21 +486,37 @@ def main() -> None:
             with ui.row().classes("w-full justify-between"):
                 with ui.column().classes("items-center"):
                     ui.label("Voltaje").classes("text-caption")
-                    watts_voltage_label = ui.label("--.-- V").classes("text-h6")
+                    ui.label().bind_text_from(
+                        sensorwatts_view,
+                        "voltage",
+                    ).classes("text-h6")
                 with ui.column().classes("items-center"):
                     ui.label("Corriente").classes("text-caption")
-                    watts_current_label = ui.label("--.--- A").classes("text-h6")
+                    ui.label().bind_text_from(
+                        sensorwatts_view,
+                        "current",
+                    ).classes("text-h6")
                 with ui.column().classes("items-center"):
                     ui.label("FP").classes("text-caption")
-                    watts_pf_label = ui.label("-.----").classes("text-h6")
+                    ui.label().bind_text_from(
+                        sensorwatts_view,
+                        "power_factor",
+                    ).classes("text-h6")
                 with ui.column().classes("items-center"):
                     ui.label("Potencia activa").classes("text-caption")
-                    watts_power_label = ui.label("--.-- W").classes("text-h6")
+                    ui.label().bind_text_from(
+                        sensorwatts_view,
+                        "active_power",
+                    ).classes("text-h6")
 
-            watts_status_label = ui.label(
-                f"CONECTANDO A {args.sensorwatts_url}..."
+            ui.label().bind_text_from(
+                sensorwatts_view,
+                "status",
             ).classes("text-subtitle1 text-grey-7")
-            recording_status_label = ui.label("REGISTRO DETENIDO · 0 MUESTRAS")
+            ui.label().bind_text_from(
+                recording_view,
+                "status",
+            ).classes("text-subtitle1")
 
             def toggle_recording() -> None:
                 nonlocal recording, recording_started
@@ -505,27 +526,21 @@ def main() -> None:
                         recording = False
                         rows_to_download = list(recorded_rows)
                         recorded_rows.clear()
+                        recording_view["button"] = "INICIAR REGISTRO CSV"
                     else:
                         recorded_rows.clear()
                         recording_started = time.monotonic()
                         recording = True
+                        recording_view["button"] = "DETENER Y DESCARGAR CSV"
+                        recording_view["status"] = (
+                            "REGISTRANDO · ESPERANDO MUESTRAS"
+                        )
 
                 if rows_to_download is None:
-                    record_button.set_text("DETENER Y DESCARGAR CSV")
-                    recording_status_label.set_text(
-                        "REGISTRANDO · ESPERANDO MUESTRAS"
-                    )
-                    recording_status_label.classes(
-                        replace="text-subtitle1 text-negative font-bold"
-                    )
                     return
 
-                record_button.set_text("INICIAR REGISTRO CSV")
-                recording_status_label.classes(
-                    replace="text-subtitle1 text-grey-7"
-                )
                 if not rows_to_download:
-                    recording_status_label.set_text(
+                    recording_view["status"] = (
                         "REGISTRO DETENIDO · SIN MUESTRAS"
                     )
                     ui.notify(
@@ -547,7 +562,7 @@ def main() -> None:
                     filename,
                     media_type="text/csv",
                 )
-                recording_status_label.set_text(
+                recording_view["status"] = (
                     f"DESCARGADO · {len(rows_to_download)} MUESTRAS · "
                     "REGISTRO LIMPIO"
                 )
@@ -557,62 +572,11 @@ def main() -> None:
                 )
 
             record_button = ui.button(
-                "INICIAR REGISTRO CSV",
                 on_click=toggle_recording,
+            ).bind_text_from(
+                recording_view,
+                "button",
             ).classes("w-full text-h6")
-
-            def update_sensorwatts() -> None:
-                with sensorwatts_lock:
-                    reading = sensorwatts_reading
-                    error = sensorwatts_error
-                    last_read = sensorwatts_last_read
-                if reading is not None:
-                    watts_voltage_label.set_text(f"{reading.voltage_v:.2f} V")
-                    watts_current_label.set_text(f"{reading.current_a:.3f} A")
-                    watts_pf_label.set_text(f"{reading.power_factor:.4f}")
-                    watts_power_label.set_text(
-                        f"{reading.active_power_w:.2f} W"
-                    )
-                if error is not None:
-                    watts_status_label.set_text(
-                        f"ERROR SENSORWATTS: {error}"
-                    )
-                    watts_status_label.classes(
-                        replace="text-subtitle1 text-negative"
-                    )
-                elif reading is None:
-                    watts_status_label.set_text("ESPERANDO PRIMERA LECTURA...")
-                else:
-                    age_s = time.monotonic() - last_read
-                    watts_status_label.set_text(
-                        "SENSORWATTS CONECTADO"
-                        if age_s <= 3.0
-                        else f"LECTURA SIN ACTUALIZAR · {age_s:.1f} s"
-                    )
-                    watts_status_label.classes(
-                        replace=(
-                            "text-subtitle1 text-positive"
-                            if age_s <= 3.0
-                            else "text-subtitle1 text-warning"
-                        )
-                    )
-
-                with recording_lock:
-                    is_recording = recording
-                    sample_count = len(recorded_rows)
-                    elapsed_s = (
-                        time.monotonic() - recording_started
-                        if is_recording
-                        else 0.0
-                    )
-                if is_recording:
-                    record_button.set_text("DETENER Y DESCARGAR CSV")
-                    recording_status_label.set_text(
-                        f"REGISTRANDO · {sample_count} MUESTRAS · "
-                        f"{elapsed_s:.0f} s"
-                    )
-
-            client_timers.append(ui.timer(0.5, update_sensorwatts))
 
         ui.label(
             "El voltaje mostrado es una estimación ideal del PWM físico. "
