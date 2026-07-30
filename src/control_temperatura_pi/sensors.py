@@ -17,6 +17,43 @@ def select_device_by_name(devices: list[object], expected_name: str) -> object |
     )
 
 
+def filter_device_names(
+    devices: list[object],
+    prefix: str = "GDX",
+) -> list[str]:
+    """Return unique device names that begin with the requested prefix."""
+    names: list[str] = []
+    for device in devices:
+        name = str(getattr(device, "name", "")).strip()
+        if name.startswith(prefix) and name not in names:
+            names.append(name)
+    return names
+
+
+def discover_vernier_device_names(
+    connection: str,
+    ble_backend: str = "native",
+    ble_com_port: str = "",
+    prefix: str = "GDX",
+) -> list[str]:
+    """Scan without opening a device and return only matching names."""
+    try:
+        from godirect import GoDirect
+    except ImportError as error:
+        raise RuntimeError("La biblioteca 'godirect' no está instalada") from error
+
+    godirect = GoDirect(
+        use_usb=connection == "usb",
+        use_ble=connection == "ble",
+        use_ble_bg=connection == "ble" and ble_backend == "bluegiga",
+        ble_com_port=ble_com_port or None,
+    )
+    try:
+        return filter_device_names(godirect.list_devices(), prefix)
+    finally:
+        godirect.quit()
+
+
 class TemperatureSensor(Protocol):
     def read_temperature_c(self) -> float: ...
 

@@ -146,17 +146,20 @@ Para probar GPIO18 con la hornilla desconectada y medir `SP` respecto a `GND`:
 python scripts/probar_control_fase.py --real
 ```
 
-Para conectar además el Vernier configurado en la sección `[sensor]` de
-`config.toml` y mostrar su temperatura únicamente como referencia:
+Para buscar y conectar un Vernier usando la conexión definida en la sección
+`[sensor]` de `config.toml`, y mostrar su temperatura únicamente como referencia:
 
 ```bash
 python scripts/probar_control_fase.py --real --sensor
 ```
 
-La opción `--sensor` solo habilita el botón
-`CONECTAR SENSOR DE TEMPERATURA`; el programa no abre automáticamente la
-conexión BLE al arrancar. La lectura comienza después de pulsar el botón. Si la
-conexión falla, la interfaz muestra el error y permite reintentar.
+La opción `--sensor` habilita el flujo manual del Vernier, pero no abre
+automáticamente la conexión BLE al arrancar. Primero se pulsa
+`ESCANEAR SENSORES GDX`; la lista muestra únicamente dispositivos cuyo nombre
+comienza exactamente con `GDX`. Después se elige uno y se pulsa
+`CONECTAR SENSOR SELECCIONADO`. El escaneo no abre sensores ni genera lecturas.
+Si el escaneo o la conexión fallan, la interfaz muestra el error y permite
+reintentar.
 
 La misma página consulta cada segundo el endpoint de `SensorWatts`
 `http://192.168.1.211/readings` y muestra voltaje, corriente, factor de potencia
@@ -204,9 +207,11 @@ El equipo objetivo ya fue identificado con un Cypress CYW20704A2 USB
 (`04b4:f901`), administrado por BlueZ como `hci0`. La guía de instalación incluye
 los pasos para retirar el bloqueo de software antes de buscar el sensor.
 
-El sensor autorizado es `GDX-TCA 1C1002R9`, observado en la dirección BLE
-`3C:2E:F5:62:94:79`. La aplicación exige coincidencia exacta del nombre y no se
-conecta automáticamente a otro Go Direct más cercano.
+El sensor previsto para el control principal es `GDX-TCA 1C1002R9`, observado en
+la dirección BLE `3C:2E:F5:62:94:79`. El control principal conserva la
+coincidencia exacta configurada. La página de prueba manual, en cambio, permite
+escanear y seleccionar cualquiera de los dispositivos cuyo nombre comience con
+`GDX`; nunca se conecta automáticamente al más cercano.
 
 ## Ajuste PID
 

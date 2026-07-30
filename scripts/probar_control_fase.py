@@ -14,7 +14,10 @@ from control_temperatura_pi.pwm import (
     SimulatedPWMOutput,
     logical_to_physical_duty,
 )
-from control_temperatura_pi.sensors import VernierGDXTCASensor
+from control_temperatura_pi.sensors import (
+    VernierGDXTCASensor,
+    discover_vernier_device_names,
+)
 from control_temperatura_pi.sensorwatts import SensorWattsClient
 
 
@@ -42,14 +45,14 @@ def parse_args() -> argparse.Namespace:
         "--sensor",
         action="store_true",
         help=(
-            "Habilitar el botón para conectar el Vernier configurado en "
-            "config.toml; no se conecta automáticamente."
+            "Habilitar el escaneo y la conexión manual de sensores GDX; "
+            "no se conecta automáticamente."
         ),
     )
     parser.add_argument(
         "--config",
         default="config.toml",
-        help="Ruta de configuración usada por --sensor",
+        help="Ruta con la configuración BLE/USB usada por --sensor",
     )
     parser.add_argument("--pin", type=int, default=18, help="Pin en numeración BCM")
     parser.add_argument(
@@ -107,7 +110,7 @@ def main() -> None:
     args = parse_args()
     validate_args(args)
 
-    from nicegui import app, ui
+    from nicegui import app, run, ui
 
     sensor = None
     sensor_thread = None
@@ -117,6 +120,7 @@ def main() -> None:
     sensor_error: str | None = None
     sensor_last_read = 0.0
     sensor_connecting = False
+    sensor_scanning = False
     sensor_view = {
         "temperature": "--.- °C",
         "status": (
@@ -124,8 +128,10 @@ def main() -> None:
             if args.sensor
             else "SENSOR NO HABILITADO · USA --sensor"
         ),
-        "button": "CONECTAR SENSOR DE TEMPERATURA",
-        "button_enabled": args.sensor,
+        "scan_button": "ESCANEAR SENSORES GDX",
+        "scan_enabled": args.sensor,
+        "connect_button": "CONECTAR SENSOR SELECCIONADO",
+        "connect_enabled": False,
     }
 
     pwm = (
@@ -139,7 +145,22 @@ def main() -> None:
         else SimulatedPWMOutput()
     )
 
-    def connect_and_read_sensor() -> None:
+    def scan_sensor_names() -> list[str]:
+        event_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(event_loop)
+        try:
+            sensor_config = load_config(args.config).sensor
+            return discover_vernier_device_names(
+                connection=sensor_config.connection,
+                ble_backend=sensor_config.ble_backend,
+                ble_com_port=sensor_config.ble_com_port,
+                prefix="GDX",
+            )
+        finally:
+            asyncio.set_event_loop(None)
+            event_loop.close()
+
+    def connect_and_read_sensor(device_name: str) -> None:
         nonlocal sensor
         nonlocal sensor_connecting, sensor_temperature_c
         nonlocal sensor_error, sensor_last_read
@@ -153,7 +174,7 @@ def main() -> None:
                 sample_period_ms=sensor_config.sample_period_ms,
                 ble_backend=sensor_config.ble_backend,
                 ble_com_port=sensor_config.ble_com_port,
-                device_name=sensor_config.device_name,
+                device_name=device_name,
             )
             if sensor_stop.is_set():
                 created_sensor.close()
@@ -163,8 +184,9 @@ def main() -> None:
                 sensor_connecting = False
                 sensor_error = None
                 sensor_view["status"] = "ESPERANDO PRIMERA LECTURA..."
-                sensor_view["button"] = "SENSOR CONECTADO"
-                sensor_view["button_enabled"] = False
+                sensor_view["connect_button"] = "SENSOR CONECTADO"
+                sensor_view["connect_enabled"] = False
+                sensor_view["scan_enabled"] = False
             while not sensor_stop.is_set():
                 try:
                     temperature = created_sensor.read_temperature_c()
@@ -187,8 +209,9 @@ def main() -> None:
                 sensor_connecting = False
                 sensor_error = describe_error(error)
                 sensor_view["status"] = f"ERROR DEL SENSOR: {sensor_error}"
-                sensor_view["button"] = "REINTENTAR CONEXIÓN"
-                sensor_view["button_enabled"] = True
+                sensor_view["connect_button"] = "REINTENTAR CONEXIÓN"
+                sensor_view["connect_enabled"] = True
+                sensor_view["scan_enabled"] = True
         finally:
             if created_sensor is not None:
                 created_sensor.close()
@@ -365,6 +388,76 @@ def main() -> None:
                 "Esta lectura no modifica la demanda térmica ni la salida PWM."
             ).classes("text-caption text-grey-7")
 
+            sensor_select = ui.select(
+                options=[],
+                label="Sensor GDX disponible",
+            ).props("outlined").classes("w-full")
+            sensor_select.disable()
+
+            async def scan_sensors() -> None:
+                nonlocal sensor_scanning, sensor_error
+                if not args.sensor:
+                    ui.notify(
+                        "Inicia el programa con --sensor para habilitar el Vernier",
+                        type="warning",
+                    )
+                    return
+                with sensor_lock:
+                    if sensor is not None or sensor_connecting or sensor_scanning:
+                        return
+                    sensor_scanning = True
+                    sensor_error = None
+                    sensor_view["status"] = "ESCANEANDO DISPOSITIVOS BLE..."
+                    sensor_view["scan_button"] = "ESCANEANDO..."
+                    sensor_view["scan_enabled"] = False
+                    sensor_view["connect_enabled"] = False
+                sensor_select.disable()
+                try:
+                    names = await run.io_bound(scan_sensor_names)
+                    names = names or []
+                    sensor_select.set_options(
+                        names,
+                        value=names[0] if names else None,
+                    )
+                    if names:
+                        sensor_select.enable()
+                        with sensor_lock:
+                            sensor_view["status"] = (
+                                f"{len(names)} SENSOR(ES) GDX ENCONTRADO(S)"
+                            )
+                            sensor_view["connect_button"] = (
+                                "CONECTAR SENSOR SELECCIONADO"
+                            )
+                            sensor_view["connect_enabled"] = True
+                        ui.notify(
+                            f"Se encontraron {len(names)} sensores GDX",
+                            type="positive",
+                        )
+                    else:
+                        with sensor_lock:
+                            sensor_view["status"] = (
+                                "NO SE ENCONTRARON DISPOSITIVOS QUE EMPIECEN CON GDX"
+                            )
+                        ui.notify(
+                            "No se encontraron sensores GDX encendidos",
+                            type="warning",
+                        )
+                except Exception as error:
+                    with sensor_lock:
+                        sensor_error = describe_error(error)
+                        sensor_view["status"] = (
+                            f"ERROR AL ESCANEAR: {sensor_error}"
+                        )
+                    ui.notify(
+                        f"Falló el escaneo: {describe_error(error)}",
+                        type="negative",
+                    )
+                finally:
+                    with sensor_lock:
+                        sensor_scanning = False
+                        sensor_view["scan_button"] = "VOLVER A ESCANEAR GDX"
+                        sensor_view["scan_enabled"] = True
+
             def start_sensor_connection() -> None:
                 nonlocal sensor_thread, sensor_connecting
                 nonlocal sensor_temperature_c, sensor_error
@@ -374,31 +467,51 @@ def main() -> None:
                         type="warning",
                     )
                     return
+                selected_device = str(sensor_select.value or "").strip()
+                if not selected_device.startswith("GDX"):
+                    ui.notify(
+                        "Primero escanea y selecciona un sensor GDX",
+                        type="warning",
+                    )
+                    return
                 with sensor_lock:
-                    if sensor is not None or sensor_connecting:
+                    if sensor is not None or sensor_connecting or sensor_scanning:
                         return
                     sensor_connecting = True
                     sensor_temperature_c = None
                     sensor_error = None
                     sensor_view["temperature"] = "--.- °C"
-                    sensor_view["status"] = "CONECTANDO SENSOR..."
-                    sensor_view["button"] = "CONECTANDO..."
-                    sensor_view["button_enabled"] = False
+                    sensor_view["status"] = f"CONECTANDO A {selected_device}..."
+                    sensor_view["connect_button"] = "CONECTANDO..."
+                    sensor_view["connect_enabled"] = False
+                    sensor_view["scan_enabled"] = False
+                sensor_select.disable()
                 sensor_thread = threading.Thread(
                     target=connect_and_read_sensor,
+                    args=(selected_device,),
                     name="vernier-temperature-reference",
                     daemon=True,
                 )
                 sensor_thread.start()
 
-            sensor_button = ui.button(
+            ui.button(
+                on_click=scan_sensors,
+            ).bind_text_from(
+                sensor_view,
+                "scan_button",
+            ).bind_enabled_from(
+                sensor_view,
+                "scan_enabled",
+            ).classes("w-full")
+
+            ui.button(
                 on_click=start_sensor_connection,
             ).bind_text_from(
                 sensor_view,
-                "button",
+                "connect_button",
             ).bind_enabled_from(
                 sensor_view,
-                "button_enabled",
+                "connect_enabled",
             ).classes("w-full")
 
         with ui.card().classes("w-full max-w-2xl"):
