@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import argparse
 import threading
+import time
 
+from control_temperatura_pi.config import load_config
 from control_temperatura_pi.pwm import (
     GPIOZeroPWMOutput,
     SimulatedPWMOutput,
     logical_to_physical_duty,
 )
+from control_temperatura_pi.sensors import VernierGDXTCASensor
 
 
 def parse_args() -> argparse.Namespace:
@@ -20,6 +23,19 @@ def parse_args() -> argparse.Namespace:
         "--real",
         action="store_true",
         help="Crear la salida física. Sin esta opción se usa una salida simulada.",
+    )
+    parser.add_argument(
+        "--sensor",
+        action="store_true",
+        help=(
+            "Conectar el Vernier configurado en config.toml solo para mostrar "
+            "su temperatura; no modifica la potencia."
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        default="config.toml",
+        help="Ruta de configuración usada por --sensor",
     )
     parser.add_argument("--pin", type=int, default=18, help="Pin en numeración BCM")
     parser.add_argument(
@@ -64,16 +80,63 @@ def main() -> None:
 
     from nicegui import app, ui
 
-    pwm = (
-        GPIOZeroPWMOutput(
-            bcm_pin=args.pin,
-            frequency_hz=args.frequency,
-            active_high=True,
-            active_duty_ceiling_percent=args.active_ceiling,
+    sensor = None
+    sensor_thread = None
+    sensor_stop = threading.Event()
+    sensor_lock = threading.Lock()
+    sensor_temperature_c: float | None = None
+    sensor_error: str | None = None
+    sensor_last_read = 0.0
+
+    if args.sensor:
+        sensor_config = load_config(args.config).sensor
+        sensor = VernierGDXTCASensor(
+            connection=sensor_config.connection,
+            sample_period_ms=sensor_config.sample_period_ms,
+            ble_backend=sensor_config.ble_backend,
+            ble_com_port=sensor_config.ble_com_port,
+            device_name=sensor_config.device_name,
         )
-        if args.real
-        else SimulatedPWMOutput()
-    )
+
+    try:
+        pwm = (
+            GPIOZeroPWMOutput(
+                bcm_pin=args.pin,
+                frequency_hz=args.frequency,
+                active_high=True,
+                active_duty_ceiling_percent=args.active_ceiling,
+            )
+            if args.real
+            else SimulatedPWMOutput()
+        )
+    except Exception:
+        if sensor is not None:
+            sensor.close()
+        raise
+
+    if sensor is not None:
+        def read_sensor() -> None:
+            nonlocal sensor_temperature_c, sensor_error, sensor_last_read
+            while not sensor_stop.is_set():
+                try:
+                    temperature = sensor.read_temperature_c()
+                    with sensor_lock:
+                        sensor_temperature_c = temperature
+                        sensor_error = None
+                        sensor_last_read = time.monotonic()
+                except Exception as error:
+                    with sensor_lock:
+                        sensor_error = str(error)
+                    if sensor_stop.wait(0.5):
+                        break
+
+        sensor_thread = threading.Thread(
+            target=read_sensor,
+            name="vernier-temperature-reference",
+            daemon=True,
+        )
+        sensor_thread.start()
+
     lock = threading.Lock()
     enabled = False
     requested_duty = 0.0
@@ -93,11 +156,16 @@ def main() -> None:
             requested_duty = 0.0
             pwm.set_duty_percent(0.0)
 
-    def close_output() -> None:
+    def close_hardware() -> None:
         disable_output()
         pwm.close()
+        sensor_stop.set()
+        if sensor is not None:
+            sensor.close()
+        if sensor_thread is not None:
+            sensor_thread.join(timeout=2.0)
 
-    app.on_shutdown(close_output)
+    app.on_shutdown(close_hardware)
 
     @ui.page("/")
     def index() -> None:
@@ -111,8 +179,52 @@ def main() -> None:
             f"{mode} · BCM{args.pin} · {args.frequency:g} Hz"
         ).classes(f"text-h6 font-bold {mode_color}")
         ui.label(
-            "No utiliza sensor de temperatura ni PID. La salida inicia en 0 %."
+            "La potencia se controla únicamente con el slider; "
+            "la temperatura es solo una referencia y no utiliza PID."
         ).classes("text-subtitle1")
+
+        with ui.card().classes("w-full max-w-2xl"):
+            ui.label("Temperatura de referencia").classes("text-subtitle2")
+            temperature_label = ui.label("--.- °C").classes("text-h3")
+            sensor_status_label = ui.label(
+                "CONECTANDO SENSOR..." if args.sensor else "SENSOR NO HABILITADO"
+            ).classes("text-subtitle1 text-grey-7")
+            ui.label(
+                "Esta lectura no modifica la demanda térmica ni la salida PWM."
+            ).classes("text-caption text-grey-7")
+
+            def update_temperature() -> None:
+                if not args.sensor:
+                    return
+                with sensor_lock:
+                    temperature = sensor_temperature_c
+                    error = sensor_error
+                    last_read = sensor_last_read
+                if error is not None:
+                    sensor_status_label.set_text(f"ERROR DEL SENSOR: {error}")
+                    sensor_status_label.classes(
+                        replace="text-subtitle1 text-negative"
+                    )
+                    return
+                if temperature is None:
+                    sensor_status_label.set_text("ESPERANDO PRIMERA LECTURA...")
+                    return
+                temperature_label.set_text(f"{temperature:.1f} °C")
+                age_s = time.monotonic() - last_read
+                if age_s > 3.0:
+                    sensor_status_label.set_text(
+                        f"LECTURA SIN ACTUALIZAR · {age_s:.1f} s"
+                    )
+                    sensor_status_label.classes(
+                        replace="text-subtitle1 text-warning"
+                    )
+                else:
+                    sensor_status_label.set_text("SENSOR CONECTADO")
+                    sensor_status_label.classes(
+                        replace="text-subtitle1 text-positive"
+                    )
+
+            ui.timer(0.5, update_temperature)
 
         with ui.card().classes("w-full max-w-2xl"):
             ui.label("Demanda térmica solicitada").classes("text-subtitle2")
@@ -202,6 +314,11 @@ def main() -> None:
     print(
         f"Modo: {'GPIO real' if args.real else 'simulado'}; "
         f"BCM{args.pin}; {args.frequency:g} Hz; máximo {args.max_duty:g} %"
+    )
+    print(
+        "Sensor Vernier habilitado solo como referencia."
+        if args.sensor
+        else "Sensor no habilitado; usa --sensor para mostrar la temperatura."
     )
     print("La salida se inicializó en 0 %. Ctrl+C también ejecuta el apagado.")
     ui.run(

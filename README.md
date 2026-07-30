@@ -125,12 +125,14 @@ al voltaje `SP`. El PID manda una demanda térmica normalizada de 0 a 100 % y la
 capa GPIO realiza la inversión y compensación del rango muerto. El comportamiento
 real deberá caracterizarse y ajustarse en el equipo.
 
-### Prueba manual del control de fase sin sensor
+### Prueba manual del control de fase con temperatura de referencia
 
 El script aislado `scripts/probar_control_fase.py` ofrece un slider de 0 a 100 %
-sin crear el sensor ni ejecutar el PID. Inicia siempre con demanda térmica 0 % y
-PWM físico 100 %, exige habilitación manual, incluye botón de paro y apaga la
-salida si el navegador se desconecta.
+para controlar manualmente la potencia sin ejecutar el PID. Opcionalmente puede
+mostrar la temperatura del Vernier como referencia; la lectura no modifica la
+demanda térmica ni la salida PWM. El script inicia siempre con demanda térmica
+0 % y PWM físico 100 %, exige habilitación manual, incluye botón de paro y apaga
+la salida si el navegador se desconecta.
 
 Primero se puede comprobar la interfaz con PWM simulado:
 
@@ -142,6 +144,13 @@ Para probar GPIO18 con la hornilla desconectada y medir `SP` respecto a `GND`:
 
 ```bash
 python scripts/probar_control_fase.py --real
+```
+
+Para conectar además el Vernier configurado en la sección `[sensor]` de
+`config.toml` y mostrar su temperatura únicamente como referencia:
+
+```bash
+python scripts/probar_control_fase.py --real --sensor
 ```
 
 La interfaz queda en `http://IP_DE_LA_RASPBERRY:8081`. Para limitar una primera
