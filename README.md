@@ -167,7 +167,8 @@ y potencia activa. El botón `INICIAR REGISTRO CSV` comienza a registrar solo
 desde ese momento. Al pulsar `DETENER Y DESCARGAR CSV`, la página descarga el
 archivo y limpia las muestras para permitir un registro nuevo.
 
-El CSV contiene fecha/hora, tiempo transcurrido, porcentaje lógico del slider,
+El CSV contiene las columnas separadas `Fecha` (`DD-MM-YYYY`) y `Hora`
+(`HH:MM:SS`), además de tiempo transcurrido, porcentaje lógico del slider,
 voltaje estimado de referencia, porcentaje PWM físico, temperatura, voltaje de
 red, corriente, factor de potencia y potencia activa. Solo se agrega una fila
 cuando se recibe una respuesta válida de `SensorWatts`.

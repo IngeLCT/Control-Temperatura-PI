@@ -246,7 +246,8 @@ def main() -> None:
         "button": "INICIAR REGISTRO CSV",
     }
     csv_fields = [
-        "FechaHora",
+        "Fecha",
+        "Hora",
         "Tiempo_s",
         "PWM_Slider_percent",
         "V_estimada",
@@ -289,7 +290,8 @@ def main() -> None:
             elapsed_s = time.monotonic() - recording_started
             recorded_rows.append(
                 {
-                    "FechaHora": now.isoformat(timespec="seconds"),
+                    "Fecha": now.strftime("%d-%m-%Y"),
+                    "Hora": now.strftime("%H:%M:%S"),
                     "Tiempo_s": f"{elapsed_s:.1f}",
                     "PWM_Slider_percent": f"{logical_duty:.1f}",
                     "V_estimada": f"{3.3 * physical_duty / 100.0:.3f}",
