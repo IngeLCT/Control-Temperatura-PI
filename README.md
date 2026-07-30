@@ -131,8 +131,9 @@ El script aislado `scripts/probar_control_fase.py` ofrece un slider de 0 a 100 %
 para controlar manualmente la potencia sin ejecutar el PID. Opcionalmente puede
 mostrar la temperatura del Vernier como referencia; la lectura no modifica la
 demanda térmica ni la salida PWM. El script inicia siempre con demanda térmica
-0 % y PWM físico 100 %, exige habilitación manual, incluye botón de paro y apaga
-la salida si el navegador se desconecta.
+0 % y PWM físico 100 %, exige habilitación manual e incluye botón de paro. La
+prueba controlada se ejecuta dentro de la Raspberry y continúa aunque el
+navegador pierda conexión.
 
 Primero se puede comprobar la interfaz con PWM simulado:
 
@@ -162,36 +163,55 @@ Si el escaneo o la conexión fallan, la interfaz muestra el error y permite
 reintentar.
 
 La misma página consulta cada segundo el endpoint de `SensorWatts`
-`http://192.168.1.211/readings` y muestra voltaje, corriente, factor de potencia
-y potencia activa. El botón `INICIAR REGISTRO CSV` comienza a registrar solo
+`http://192.168.1.211/readings` y muestra voltaje, corriente y potencia activa.
+El botón `INICIAR REGISTRO CSV` comienza a registrar solo
 desde ese momento. Al pulsar `DETENER Y DESCARGAR CSV`, la página descarga el
-archivo y limpia las muestras para permitir un registro nuevo.
+archivo. Cada muestra se escribe progresivamente en
+`data/registros/` dentro de la Raspberry, de modo que el archivo no depende de
+la memoria RAM ni de que el navegador permanezca conectado. Se puede cambiar
+el directorio con `--csv-dir`.
 
 El CSV contiene las columnas separadas `Fecha` (`DD-MM-YYYY`) y `Hora`
 (`HH:MM:SS`), además de tiempo transcurrido, porcentaje lógico del slider,
 voltaje estimado de referencia, porcentaje PWM físico, temperatura, voltaje de
-red, corriente, factor de potencia y potencia activa. Solo se agrega una fila
+red, corriente y potencia activa. Solo se agrega una fila
 cuando se recibe una respuesta válida de `SensorWatts`.
 
 El campo `Tiempo por paso (minutos)` permite elegir un valor entero entre 1 y
-60; el valor predeterminado es 3. El botón `INICIAR PRUEBA CONTROLADA`, ubicado
-debajo del paro, inicia automáticamente el registro CSV y ejecuta una rampa
-escalonada de PWM. Mantiene cada nivel durante el tiempo elegido, sube de 10 % a
-100 %, baja de 90 % a 10 % y finalmente fuerza 0 %, detiene el registro y
-descarga el CSV. Son 19 etapas: con 1 minuto por paso dura 19 minutos; con 2,
-38 minutos; con 3, 57 minutos; y con 5, 95 minutos. Durante la prueba quedan
-bloqueados el campo de tiempo, el slider, el interruptor de habilitación y el
-registro manual. El botón cambia a
-`CANCELAR PRUEBA CONTROLADA`; el paro forzado también cancela la secuencia,
-fuerza 0 % y descarga las muestras parciales. Si el navegador se desconecta, la
-salida se fuerza inmediatamente a 0 % y el registro se cancela sin intentar una
-descarga sobre una sesión inexistente.
+60; el valor predeterminado es 3. `Paso PWM (%)` acepta divisores enteros de
+100, por ejemplo 5, 10, 20 o 25. El botón `INICIAR PRUEBA CONTROLADA` inicia
+automáticamente el CSV interno y ejecuta una rampa que sube hasta 100 %, baja
+con el mismo paso y finalmente fuerza 0 %. Con paso 10 son 19 etapas; con paso
+5 son 39; con paso 20 son 9. La interfaz calcula la duración total según ambos
+campos.
+
+Durante la prueba quedan bloqueados los campos, el slider, el interruptor de
+habilitación y el registro manual. `CANCELAR PRUEBA CONTROLADA` y el paro
+detienen la secuencia y fuerzan 0 %. Si el navegador se desconecta, la Raspberry
+continúa la prueba y sigue guardando el CSV. Al finalizar intenta enviarlo a
+cualquier navegador conectado; si no existe uno, conserva el archivo y la
+interfaz permite descargarlo después con `DESCARGAR ÚLTIMO CSV GUARDADO`.
+Fuera de la prueba controlada, la salida manual conserva el apagado de seguridad
+cuando se desconecta el último navegador.
+
+La pantalla agrupa temperatura, voltaje, corriente y potencia activa en una
+tarjeta superior. Los controles de sensores, tiempos,
+paso PWM y CSV están en una segunda tarjeta. El control PWM y la gráfica
+`Temperatura vs tiempo` aparecen lado a lado. La gráfica se limpia y comienza
+solo cuando inicia un registro manual o una prueba controlada.
 
 Si cambia la dirección del medidor, se puede indicar otro endpoint:
 
 ```bash
 python scripts/probar_control_fase.py --real --sensor \
   --sensorwatts-url http://192.168.1.211/readings
+```
+
+Para guardar los CSV en otra carpeta:
+
+```bash
+python scripts/probar_control_fase.py --real --sensor \
+  --csv-dir /home/lct/Documents/Proyectos/Control-Temperatura-PI/registros
 ```
 
 La interfaz queda en `http://IP_DE_LA_RASPBERRY:8081`. Para limitar una primera

@@ -4,9 +4,10 @@ import argparse
 import asyncio
 import csv
 from datetime import datetime
-import io
+from pathlib import Path
 import threading
 import time
+from typing import TextIO
 
 from control_temperatura_pi.config import load_config
 from control_temperatura_pi.pwm import (
@@ -26,15 +27,20 @@ CONTROLLED_TEST_MIN_STEP_MINUTES = 1
 CONTROLLED_TEST_MAX_STEP_MINUTES = 60
 
 
-def controlled_test_levels() -> tuple[int, ...]:
+def controlled_test_levels(step_percent: int = 10) -> tuple[int, ...]:
+    if not 1 <= step_percent <= 100 or 100 % step_percent != 0:
+        raise ValueError("El paso PWM debe dividir exactamente 100")
     return (
-        *range(10, 101, 10),
-        *range(90, 0, -10),
+        *range(step_percent, 101, step_percent),
+        *range(100 - step_percent, 0, -step_percent),
     )
 
 
-def controlled_test_duration_minutes(step_minutes: int) -> int:
-    return len(controlled_test_levels()) * step_minutes
+def controlled_test_duration_minutes(
+    step_minutes: int,
+    step_percent: int = 10,
+) -> int:
+    return len(controlled_test_levels(step_percent)) * step_minutes
 
 
 def describe_error(error: Exception) -> str:
@@ -99,6 +105,11 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=2.0,
         help="Tiempo máximo de cada consulta HTTP a SensorWatts, en segundos",
+    )
+    parser.add_argument(
+        "--csv-dir",
+        default="data/registros",
+        help="Directorio interno de la Raspberry para conservar los CSV",
     )
     parser.add_argument("--host", default="0.0.0.0", help="Dirección de escucha")
     parser.add_argument("--port", type=int, default=8081, help="Puerto web")
@@ -237,6 +248,16 @@ def main() -> None:
     lock = threading.Lock()
     enabled = False
     requested_duty = 0.0
+    pwm_view = {
+        "slider": 0.0,
+        "logical": "0.0 %",
+        "physical": "PWM físico: 100.0 %",
+        "voltage": "Referencia estimada: 3.30 V",
+        "enabled": False,
+        "status": "SALIDA APAGADA",
+        "slider_enabled": False,
+        "manual_controls_enabled": True,
+    }
     sensorwatts = SensorWattsClient(
         args.sensorwatts_url,
         timeout_s=args.sensorwatts_timeout,
@@ -249,19 +270,40 @@ def main() -> None:
     sensorwatts_view = {
         "voltage": "--.-- V",
         "current": "--.--- A",
-        "power_factor": "-.----",
         "active_power": "--.-- W",
         "status": f"CONECTANDO A {args.sensorwatts_url}...",
     }
     recording_lock = threading.Lock()
     recording = False
     recording_started = 0.0
-    recorded_rows: list[dict[str, object]] = []
+    recording_file: TextIO | None = None
+    recording_writer: csv.DictWriter | None = None
+    recording_path: Path | None = None
+    recording_samples = 0
+    csv_dir = Path(args.csv_dir).expanduser().resolve()
+    existing_csv_files = (
+        list(csv_dir.glob("*.csv"))
+        if csv_dir.is_dir()
+        else []
+    )
+    last_saved_csv_path: Path | None = max(
+        existing_csv_files,
+        key=lambda path: path.stat().st_mtime,
+        default=None,
+    )
     recording_view = {
-        "status": "REGISTRO DETENIDO · 0 MUESTRAS",
+        "status": (
+            f"ÚLTIMO CSV EN PI · {last_saved_csv_path.name}"
+            if last_saved_csv_path is not None
+            else "REGISTRO DETENIDO · 0 MUESTRAS"
+        ),
         "button": "INICIAR REGISTRO CSV",
+        "manual_enabled": True,
+        "has_saved_file": last_saved_csv_path is not None,
     }
     controlled_test_running = False
+    controlled_test_thread = None
+    controlled_test_owner_id: str | None = None
     controlled_test_cancel = threading.Event()
     controlled_test_view = {
         "status": (
@@ -269,7 +311,14 @@ def main() -> None:
             f"{controlled_test_duration_minutes(CONTROLLED_TEST_DEFAULT_STEP_MINUTES)} MIN"
         ),
         "button": "INICIAR PRUEBA CONTROLADA",
+        "controls_enabled": True,
     }
+    chart_lock = threading.Lock()
+    chart_times_s: list[float] = []
+    chart_temperatures_c: list[float | None] = []
+    ui_clients_lock = threading.Lock()
+    ui_clients: dict[str, tuple[object, object]] = {}
+    ui_loop: asyncio.AbstractEventLoop | None = None
     csv_fields = [
         "Fecha",
         "Hora",
@@ -280,26 +329,164 @@ def main() -> None:
         "Temperatura_C",
         "Voltaje_V",
         "Corriente_A",
-        "FP",
         "Potencia_Activa_W",
     ]
 
-    def set_output(duty_percent: float) -> float:
+    def update_pwm_view(logical_duty: float, status: str | None = None) -> None:
+        physical_duty = logical_to_physical_duty(
+            logical_duty,
+            args.active_ceiling,
+        )
+        pwm_view["slider"] = logical_duty
+        pwm_view["logical"] = f"{logical_duty:.1f} %"
+        pwm_view["physical"] = f"PWM físico: {physical_duty:.1f} %"
+        pwm_view["voltage"] = (
+            f"Referencia estimada: {3.3 * physical_duty / 100.0:.2f} V"
+        )
+        pwm_view["enabled"] = enabled
+        pwm_view["slider_enabled"] = enabled and not controlled_test_running
+        pwm_view["manual_controls_enabled"] = not controlled_test_running
+        if status is not None:
+            pwm_view["status"] = status
+
+    def set_output(duty_percent: float, status: str | None = None) -> float:
         nonlocal requested_duty
         with lock:
             requested_duty = min(args.max_duty, max(0.0, duty_percent))
             applied = requested_duty if enabled else 0.0
             pwm.set_duty_percent(applied)
-            return applied
+        update_pwm_view(applied, status)
+        return applied
 
-    def disable_output() -> None:
+    def disable_output(reason: str = "SALIDA APAGADA") -> None:
         nonlocal enabled, requested_duty
         with lock:
             enabled = False
             requested_duty = 0.0
             pwm.set_duty_percent(0.0)
+        update_pwm_view(0.0, reason)
+
+    def update_connected_charts() -> None:
+        with chart_lock:
+            times = [round(value, 1) for value in chart_times_s]
+            temperatures = list(chart_temperatures_c)
+        with ui_clients_lock:
+            clients = list(ui_clients.values())
+        for client, chart in clients:
+            if not client.has_socket_connection:
+                continue
+            chart.options["xAxis"]["data"] = times
+            chart.options["series"][0]["data"] = temperatures
+            chart.update()
+
+    def schedule_chart_update() -> None:
+        loop = ui_loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(update_connected_charts)
+
+    def attempt_owner_download(path: Path, owner_id: str | None) -> None:
+        if owner_id is None:
+            return
+
+        def download() -> None:
+            with ui_clients_lock:
+                entry = ui_clients.get(owner_id)
+                if entry is None:
+                    entry = next(
+                        (
+                            candidate
+                            for candidate in ui_clients.values()
+                            if candidate[0].has_socket_connection
+                        ),
+                        None,
+                    )
+            if entry is None:
+                recording_view["status"] = (
+                    f"CSV GUARDADO EN PI · DESCARGA PENDIENTE · {path.name}"
+                )
+                return
+            client, _ = entry
+            if not client.has_socket_connection:
+                recording_view["status"] = (
+                    f"CSV GUARDADO EN PI · DESCARGA PENDIENTE · {path.name}"
+                )
+                return
+            with client:
+                ui.download.file(path, filename=path.name, media_type="text/csv")
+                ui.notify(
+                    f"CSV guardado en la Raspberry y enviado: {path.name}",
+                    type="positive",
+                )
+
+        loop = ui_loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(download)
+
+    def start_recording(prefix: str) -> bool:
+        nonlocal recording, recording_started
+        nonlocal recording_file, recording_writer, recording_path
+        nonlocal recording_samples
+        with recording_lock:
+            if recording:
+                return False
+            csv_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().astimezone()
+            recording_path = csv_dir / (
+                f"{prefix}_{timestamp:%Y%m%d_%H%M%S}.csv"
+            )
+            recording_file = recording_path.open(
+                "w",
+                encoding="utf-8-sig",
+                newline="",
+                buffering=1,
+            )
+            recording_writer = csv.DictWriter(
+                recording_file,
+                fieldnames=csv_fields,
+            )
+            recording_writer.writeheader()
+            recording_file.flush()
+            recording_started = time.monotonic()
+            recording_samples = 0
+            recording = True
+            recording_view["button"] = "DETENER Y DESCARGAR CSV"
+            recording_view["status"] = (
+                f"REGISTRANDO EN PI · {recording_path.name}"
+            )
+        with chart_lock:
+            chart_times_s.clear()
+            chart_temperatures_c.clear()
+        schedule_chart_update()
+        return True
+
+    def finish_recording() -> Path | None:
+        nonlocal recording, recording_file, recording_writer
+        nonlocal recording_path, last_saved_csv_path
+        with recording_lock:
+            if not recording:
+                return None
+            recording = False
+            file_handle = recording_file
+            saved_path = recording_path
+            recording_file = None
+            recording_writer = None
+            recording_path = None
+            if file_handle is not None:
+                file_handle.flush()
+                file_handle.close()
+            if saved_path is None:
+                return None
+            last_saved_csv_path = saved_path
+            recording_view["button"] = "INICIAR REGISTRO CSV"
+            recording_view["has_saved_file"] = True
+            recording_view["status"] = (
+                f"CSV GUARDADO EN PI · {recording_samples} MUESTRAS · "
+                f"{saved_path.name}"
+            )
+            return saved_path
 
     def append_record(reading) -> None:
+        nonlocal recording_samples
         with lock:
             logical_duty = requested_duty if enabled else 0.0
         physical_duty = logical_to_physical_duty(
@@ -310,30 +497,42 @@ def main() -> None:
             temperature = sensor_temperature_c
         now = datetime.now().astimezone()
         with recording_lock:
-            if not recording:
+            if not recording or recording_writer is None:
                 return
             elapsed_s = time.monotonic() - recording_started
-            recorded_rows.append(
-                {
-                    "Fecha": now.strftime("%d-%m-%Y"),
-                    "Hora": now.strftime("%H:%M:%S"),
-                    "Tiempo_s": f"{elapsed_s:.1f}",
-                    "PWM_Slider_percent": f"{logical_duty:.1f}",
-                    "V_estimada": f"{3.3 * physical_duty / 100.0:.3f}",
-                    "PWM_fisico_percent": f"{physical_duty:.1f}",
-                    "Temperatura_C": (
-                        "" if temperature is None else f"{temperature:.2f}"
-                    ),
-                    "Voltaje_V": f"{reading.voltage_v:.2f}",
-                    "Corriente_A": f"{reading.current_a:.3f}",
-                    "FP": f"{reading.power_factor:.4f}",
-                    "Potencia_Activa_W": f"{reading.active_power_w:.2f}",
-                }
-            )
+            row = {
+                "Fecha": now.strftime("%d-%m-%Y"),
+                "Hora": now.strftime("%H:%M:%S"),
+                "Tiempo_s": f"{elapsed_s:.1f}",
+                "PWM_Slider_percent": f"{logical_duty:.1f}",
+                "V_estimada": f"{3.3 * physical_duty / 100.0:.3f}",
+                "PWM_fisico_percent": f"{physical_duty:.1f}",
+                "Temperatura_C": (
+                    "" if temperature is None else f"{temperature:.2f}"
+                ),
+                "Voltaje_V": f"{reading.voltage_v:.2f}",
+                "Corriente_A": f"{reading.current_a:.3f}",
+                "Potencia_Activa_W": f"{reading.active_power_w:.2f}",
+            }
+            try:
+                recording_writer.writerow(row)
+                if recording_file is not None:
+                    recording_file.flush()
+            except Exception as error:
+                recording_view["status"] = (
+                    f"ERROR AL GUARDAR CSV: {describe_error(error)}"
+                )
+                controlled_test_cancel.set()
+                return
+            recording_samples += 1
             recording_view["status"] = (
-                f"REGISTRANDO · {len(recorded_rows)} MUESTRAS · "
+                f"REGISTRANDO EN PI · {recording_samples} MUESTRAS · "
                 f"{elapsed_s:.0f} s"
             )
+        with chart_lock:
+            chart_times_s.append(elapsed_s)
+            chart_temperatures_c.append(temperature)
+        schedule_chart_update()
 
     def read_sensorwatts() -> None:
         nonlocal sensorwatts_reading, sensorwatts_error, sensorwatts_last_read
@@ -350,9 +549,6 @@ def main() -> None:
                     sensorwatts_view["current"] = (
                         f"{reading.current_a:.3f} A"
                     )
-                    sensorwatts_view["power_factor"] = (
-                        f"{reading.power_factor:.4f}"
-                    )
                     sensorwatts_view["active_power"] = (
                         f"{reading.active_power_w:.2f} W"
                     )
@@ -367,6 +563,60 @@ def main() -> None:
             if sensorwatts_stop.wait(1.0):
                 break
 
+    def run_controlled_test(
+        step_minutes: int,
+        step_percent: int,
+        owner_id: str,
+    ) -> None:
+        nonlocal controlled_test_running, controlled_test_owner_id
+        levels = controlled_test_levels(step_percent)
+        step_seconds = step_minutes * 60.0
+        completed = False
+        try:
+            for stage, level in enumerate(levels, start=1):
+                if controlled_test_cancel.is_set():
+                    break
+                set_output(
+                    float(level),
+                    status=f"PRUEBA CONTROLADA · PWM {level} %",
+                )
+                deadline = time.monotonic() + step_seconds
+                while not controlled_test_cancel.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    seconds = int(remaining + 0.999)
+                    controlled_test_view["status"] = (
+                        f"PASO {stage}/{len(levels)} · PWM {level} % · "
+                        f"RESTAN {seconds} s"
+                    )
+                    if controlled_test_cancel.wait(min(1.0, remaining)):
+                        break
+            else:
+                completed = True
+        finally:
+            reason = (
+                "PRUEBA COMPLETADA · SALIDA 0 %"
+                if completed
+                else "PRUEBA CANCELADA · SALIDA 0 %"
+            )
+            disable_output(reason)
+            saved_path = finish_recording()
+            controlled_test_running = False
+            controlled_test_owner_id = None
+            pwm_view["manual_controls_enabled"] = True
+            pwm_view["slider_enabled"] = False
+            controlled_test_view["button"] = "INICIAR PRUEBA CONTROLADA"
+            controlled_test_view["controls_enabled"] = True
+            controlled_test_view["status"] = (
+                f"{reason} · CSV GUARDADO EN PI"
+                if saved_path is not None
+                else f"{reason} · SIN CSV"
+            )
+            recording_view["manual_enabled"] = True
+            if saved_path is not None:
+                attempt_owner_download(saved_path, owner_id)
+
     sensorwatts_thread = threading.Thread(
         target=read_sensorwatts,
         name="sensorwatts-monitor",
@@ -376,7 +626,10 @@ def main() -> None:
 
     def close_hardware() -> None:
         controlled_test_cancel.set()
-        disable_output()
+        if controlled_test_thread is not None:
+            controlled_test_thread.join(timeout=2.0)
+        disable_output("PROGRAMA CERRADO · SALIDA 0 %")
+        finish_recording()
         pwm.close()
         sensor_stop.set()
         if sensor_thread is not None:
@@ -388,68 +641,47 @@ def main() -> None:
 
     @ui.page("/")
     def index() -> None:
-        nonlocal enabled
+        nonlocal enabled, ui_loop
+        nonlocal controlled_test_thread, controlled_test_owner_id
         client = ui.context.client
+        ui_loop = asyncio.get_running_loop()
 
-        def toggle_recording(*, controlled: bool = False) -> bool:
-            nonlocal recording, recording_started
-            if controlled_test_running and not controlled:
+        def toggle_manual_recording() -> None:
+            if controlled_test_running:
                 ui.notify(
                     "El registro está administrado por la prueba controlada",
                     type="warning",
                 )
-                return False
-
-            rows_to_download: list[dict[str, object]] | None = None
+                return
             with recording_lock:
-                if recording:
-                    recording = False
-                    rows_to_download = list(recorded_rows)
-                    recorded_rows.clear()
-                    recording_view["button"] = "INICIAR REGISTRO CSV"
-                else:
-                    recorded_rows.clear()
-                    recording_started = time.monotonic()
-                    recording = True
-                    recording_view["button"] = "DETENER Y DESCARGAR CSV"
-                    recording_view["status"] = (
-                        "REGISTRANDO · ESPERANDO MUESTRAS"
+                active = recording
+            if active:
+                saved_path = finish_recording()
+                if saved_path is not None:
+                    ui.download.file(
+                        saved_path,
+                        filename=saved_path.name,
+                        media_type="text/csv",
                     )
-
-            if rows_to_download is None:
-                return True
-
-            if not rows_to_download:
-                recording_view["status"] = "REGISTRO DETENIDO · SIN MUESTRAS"
+                    ui.notify(
+                        f"CSV guardado en la Raspberry: {saved_path.name}",
+                        type="positive",
+                    )
+                return
+            try:
+                start_recording("sensorwatts")
+            except Exception as error:
                 ui.notify(
-                    "No se recibieron muestras válidas de SensorWatts",
-                    type="warning",
+                    f"No fue posible iniciar el CSV: {describe_error(error)}",
+                    type="negative",
                 )
-                return True
 
-            output = io.StringIO(newline="")
-            writer = csv.DictWriter(output, fieldnames=csv_fields)
-            writer.writeheader()
-            writer.writerows(rows_to_download)
-            prefix = "prueba_controlada" if controlled else "sensorwatts"
-            filename = (
-                f"{prefix}_"
-                f"{datetime.now().astimezone():%Y%m%d_%H%M%S}.csv"
-            )
-            ui.download.content(
-                output.getvalue().encode("utf-8-sig"),
-                filename,
-                media_type="text/csv",
-            )
-            recording_view["status"] = (
-                f"DESCARGADO · {len(rows_to_download)} MUESTRAS · "
-                "REGISTRO LIMPIO"
-            )
-            ui.notify(
-                f"CSV descargado con {len(rows_to_download)} muestras",
-                type="positive",
-            )
-            return True
+        def download_last_csv() -> None:
+            path = last_saved_csv_path
+            if path is None or not path.exists():
+                ui.notify("No hay un CSV guardado disponible", type="warning")
+                return
+            ui.download.file(path, filename=path.name, media_type="text/csv")
 
         ui.label("Prueba manual del control de fase").classes("text-h4 font-bold")
         mode = "GPIO REAL" if args.real else "SIMULACIÓN"
@@ -462,25 +694,48 @@ def main() -> None:
             "la temperatura es solo una referencia y no utiliza PID."
         ).classes("text-subtitle1")
 
-        main_cards = ui.element("div").classes(
-            "grid grid-cols-1 lg:grid-cols-2 gap-4 "
-            "w-full max-w-7xl items-stretch"
-        )
-
-        with ui.card().classes("w-full h-full") as temperature_card:
-            ui.label("Temperatura de referencia").classes("text-subtitle2")
-            ui.label().bind_text_from(
-                sensor_view,
-                "temperature",
-            ).classes("text-h3")
+        with ui.card().classes("w-full max-w-7xl"):
+            ui.label("Indicadores").classes("text-h6 font-bold")
+            with ui.row().classes(
+                "w-full justify-between gap-6 flex-wrap"
+            ):
+                with ui.column().classes("items-center"):
+                    ui.label("Temperatura").classes("text-caption")
+                    ui.label().bind_text_from(
+                        sensor_view,
+                        "temperature",
+                    ).classes("text-h5")
+                with ui.column().classes("items-center"):
+                    ui.label("Voltaje").classes("text-caption")
+                    ui.label().bind_text_from(
+                        sensorwatts_view,
+                        "voltage",
+                    ).classes("text-h5")
+                with ui.column().classes("items-center"):
+                    ui.label("Corriente").classes("text-caption")
+                    ui.label().bind_text_from(
+                        sensorwatts_view,
+                        "current",
+                    ).classes("text-h5")
+                with ui.column().classes("items-center"):
+                    ui.label("Potencia activa").classes("text-caption")
+                    ui.label().bind_text_from(
+                        sensorwatts_view,
+                        "active_power",
+                    ).classes("text-h5")
             ui.label().bind_text_from(
                 sensor_view,
                 "status",
-            ).classes("text-subtitle1 text-grey-7")
-            ui.label(
-                "Esta lectura no modifica la demanda térmica ni la salida PWM."
+            ).classes("text-caption text-grey-7")
+            ui.label().bind_text_from(
+                sensorwatts_view,
+                "status",
             ).classes("text-caption text-grey-7")
 
+        with ui.card().classes("w-full max-w-7xl") as controls_card:
+            ui.label("Controles de prueba y registro").classes(
+                "text-h6 font-bold"
+            )
             sensor_select = ui.select(
                 options=[],
                 label="Sensor GDX disponible",
@@ -606,126 +861,81 @@ def main() -> None:
                 sensor_view,
                 "connect_enabled",
             ).classes("w-full")
-        temperature_card.move(main_cards)
 
-        with ui.card().classes("w-full h-full") as pwm_card:
-            ui.label("Demanda térmica solicitada").classes("text-subtitle2")
-            duty_label = ui.label("0.0 %").classes("text-h3")
-            physical_label = ui.label("PWM físico: 100.0 %").classes(
-                "text-subtitle1"
-            )
-            voltage_label = ui.label("Referencia estimada: 3.30 V").classes(
-                "text-subtitle1"
-            )
-            slider = ui.slider(
-                min=0.0,
-                max=args.max_duty,
-                step=1.0,
-                value=0.0,
-            ).classes("w-full")
-            slider.disable()
+            with ui.row().classes("w-full gap-4"):
+                controlled_step_input = ui.number(
+                    label="Tiempo por paso (minutos)",
+                    value=CONTROLLED_TEST_DEFAULT_STEP_MINUTES,
+                    min=CONTROLLED_TEST_MIN_STEP_MINUTES,
+                    max=CONTROLLED_TEST_MAX_STEP_MINUTES,
+                    step=1,
+                ).props("outlined").classes("grow")
+                pwm_step_input = ui.number(
+                    label="Paso PWM (%)",
+                    value=10,
+                    min=1,
+                    max=100,
+                    step=1,
+                ).props("outlined").classes("grow")
 
-            enable_switch = ui.switch("Habilitar salida", value=False)
-            status_label = ui.label("SALIDA APAGADA").classes(
-                "text-h6 font-bold text-positive"
-            )
-
-            def update_labels(logical_duty: float) -> None:
-                physical_duty = logical_to_physical_duty(
-                    logical_duty,
-                    args.active_ceiling,
-                )
-                duty_label.set_text(f"{logical_duty:.1f} %")
-                physical_label.set_text(f"PWM físico: {physical_duty:.1f} %")
-                voltage_label.set_text(
-                    f"Referencia estimada: "
-                    f"{3.3 * physical_duty / 100.0:.2f} V"
-            )
-
-            def change_duty(event) -> None:
-                if controlled_test_running:
-                    return
-                applied = set_output(float(event.value))
-                update_labels(applied)
-
-            def change_enabled(event) -> None:
-                nonlocal enabled
-                if controlled_test_running:
-                    return
-                enabled = bool(event.value)
-                if enabled:
-                    slider.enable()
-                    applied = set_output(float(slider.value))
-                    status_label.set_text("SALIDA HABILITADA")
-                    status_label.classes(
-                        replace="text-h6 font-bold text-negative"
-                    )
-                else:
-                    slider.set_value(0.0)
-                    slider.disable()
-                    disable_output()
-                    applied = 0.0
-                    status_label.set_text("SALIDA APAGADA")
-                    status_label.classes(
-                        replace="text-h6 font-bold text-positive"
-                    )
-                update_labels(applied)
-
-            def emergency_stop() -> None:
-                controlled_test_cancel.set()
-                slider.set_value(0.0)
-                enable_switch.set_value(False)
-                disable_output()
-                update_labels(0.0)
-                status_label.set_text("PARO APLICADO · SALIDA 0 %")
-                status_label.classes(replace="text-h6 font-bold text-negative")
-
-            slider.on_value_change(change_duty)
-            enable_switch.on_value_change(change_enabled)
-            ui.button(
-                "PARO · FORZAR 0 %",
-                on_click=emergency_stop,
-                color="negative",
-            ).classes("w-full text-h6")
-
-            controlled_step_input = ui.number(
-                label="Tiempo por paso (minutos)",
-                value=CONTROLLED_TEST_DEFAULT_STEP_MINUTES,
-                min=CONTROLLED_TEST_MIN_STEP_MINUTES,
-                max=CONTROLLED_TEST_MAX_STEP_MINUTES,
-                step=1,
-            ).props("outlined").classes("w-full")
-
-            def update_controlled_duration(event) -> None:
-                if controlled_test_running or event.value is None:
-                    return
-                value = float(event.value)
-                if not value.is_integer():
-                    return
-                minutes = int(value)
+            def selected_test_configuration() -> tuple[int, int] | None:
+                try:
+                    raw_minutes = float(controlled_step_input.value)
+                    raw_step = float(pwm_step_input.value)
+                except (TypeError, ValueError):
+                    return None
+                if not raw_minutes.is_integer() or not raw_step.is_integer():
+                    return None
+                minutes = int(raw_minutes)
+                step = int(raw_step)
                 if not (
                     CONTROLLED_TEST_MIN_STEP_MINUTES
                     <= minutes
                     <= CONTROLLED_TEST_MAX_STEP_MINUTES
                 ):
+                    return None
+                try:
+                    controlled_test_levels(step)
+                except ValueError:
+                    return None
+                return minutes, step
+
+            def update_controlled_summary() -> None:
+                configuration = selected_test_configuration()
+                if configuration is None or controlled_test_running:
                     return
-                total_minutes = controlled_test_duration_minutes(minutes)
+                minutes, step = configuration
+                stages = len(controlled_test_levels(step))
+                total = controlled_test_duration_minutes(minutes, step)
                 controlled_test_view["status"] = (
-                    f"PRUEBA CONTROLADA DETENIDA · 19 PASOS · "
-                    f"{total_minutes} MIN"
+                    f"PRUEBA DETENIDA · {stages} PASOS · {total} MIN"
                 )
 
-            controlled_step_input.on_value_change(update_controlled_duration)
+            controlled_step_input.on_value_change(
+                lambda: update_controlled_summary()
+            )
+            pwm_step_input.on_value_change(
+                lambda: update_controlled_summary()
+            )
+            controlled_step_input.bind_enabled_from(
+                controlled_test_view,
+                "controls_enabled",
+            )
+            pwm_step_input.bind_enabled_from(
+                controlled_test_view,
+                "controls_enabled",
+            )
 
-            async def toggle_controlled_test() -> None:
-                nonlocal controlled_test_running, enabled, recording
+            def toggle_controlled_test() -> None:
+                nonlocal controlled_test_running, controlled_test_thread
+                nonlocal controlled_test_owner_id, enabled
                 if controlled_test_running:
                     controlled_test_cancel.set()
                     controlled_test_view["button"] = "CANCELANDO PRUEBA..."
                     controlled_test_view["status"] = (
                         "CANCELACIÓN SOLICITADA · FORZANDO SALIDA 0 %"
                     )
-                    disable_output()
+                    disable_output("CANCELACIÓN SOLICITADA · SALIDA 0 %")
                     return
 
                 if args.max_duty < 100.0:
@@ -734,7 +944,15 @@ def main() -> None:
                         type="warning",
                     )
                     return
-
+                configuration = selected_test_configuration()
+                if configuration is None:
+                    ui.notify(
+                        "Usa minutos enteros de 1 a 60 y un paso PWM "
+                        "entero que divida exactamente 100 "
+                        "(por ejemplo 5, 10, 20 o 25)",
+                        type="warning",
+                    )
+                    return
                 with recording_lock:
                     recording_in_progress = recording
                 if recording_in_progress:
@@ -743,7 +961,6 @@ def main() -> None:
                         type="warning",
                     )
                     return
-
                 with sensorwatts_lock:
                     watts_available = (
                         sensorwatts_reading is not None
@@ -756,117 +973,47 @@ def main() -> None:
                     )
                     return
 
+                minutes, step = configuration
                 try:
-                    raw_step_minutes = float(controlled_step_input.value)
-                except (TypeError, ValueError):
-                    raw_step_minutes = 0.0
-                if (
-                    not raw_step_minutes.is_integer()
-                    or not (
-                        CONTROLLED_TEST_MIN_STEP_MINUTES
-                        <= raw_step_minutes
-                        <= CONTROLLED_TEST_MAX_STEP_MINUTES
-                    )
-                ):
+                    if not start_recording("prueba_controlada"):
+                        ui.notify(
+                            "Ya existe un registro activo",
+                            type="warning",
+                        )
+                        return
+                except Exception as error:
                     ui.notify(
-                        "El tiempo por paso debe ser un número entero "
-                        "entre 1 y 60 minutos",
-                        type="warning",
+                        f"No fue posible crear el CSV interno: "
+                        f"{describe_error(error)}",
+                        type="negative",
                     )
                     return
-                step_minutes = int(raw_step_minutes)
-                step_seconds = step_minutes * 60.0
-                total_minutes = controlled_test_duration_minutes(step_minutes)
 
+                enabled = True
+                set_output(0.0, "PRUEBA CONTROLADA INICIANDO")
                 controlled_test_running = True
                 controlled_test_cancel.clear()
-                controlled_test_view["button"] = "CANCELAR PRUEBA CONTROLADA"
+                controlled_test_owner_id = client.id
+                pwm_view["manual_controls_enabled"] = False
+                pwm_view["slider_enabled"] = False
+                controlled_test_view["button"] = (
+                    "CANCELAR PRUEBA CONTROLADA"
+                )
+                controlled_test_view["controls_enabled"] = False
+                recording_view["manual_enabled"] = False
+                stages = len(controlled_test_levels(step))
+                total = controlled_test_duration_minutes(minutes, step)
                 controlled_test_view["status"] = (
-                    f"INICIANDO · {step_minutes} MIN POR PASO · "
-                    f"{total_minutes} MIN EN TOTAL"
+                    f"INICIANDO · PASO {step} % · {stages} ETAPAS · "
+                    f"{total} MIN"
                 )
-                record_button.disable()
-                controlled_step_input.disable()
-                enable_switch.set_value(True)
-                enable_switch.disable()
-                slider.disable()
-                enabled = True
-                set_output(0.0)
-                update_labels(0.0)
-                status_label.set_text("PRUEBA CONTROLADA ACTIVA")
-                status_label.classes(
-                    replace="text-h6 font-bold text-negative"
+                controlled_test_thread = threading.Thread(
+                    target=run_controlled_test,
+                    args=(minutes, step, client.id),
+                    name="controlled-pwm-test",
+                    daemon=True,
                 )
-
-                if not toggle_recording(controlled=True):
-                    controlled_test_cancel.set()
-
-                levels = controlled_test_levels()
-                completed = False
-                try:
-                    for stage, level in enumerate(levels, start=1):
-                        if controlled_test_cancel.is_set():
-                            break
-
-                        slider.set_value(float(level))
-                        applied = set_output(float(level))
-                        update_labels(applied)
-                        deadline = (
-                            time.monotonic() + step_seconds
-                        )
-
-                        while not controlled_test_cancel.is_set():
-                            remaining = deadline - time.monotonic()
-                            if remaining <= 0:
-                                break
-                            seconds = int(remaining + 0.999)
-                            controlled_test_view["status"] = (
-                                f"PASO {stage}/{len(levels)} · "
-                                f"PWM {level} % · RESTAN {seconds} s"
-                            )
-                            await asyncio.sleep(min(1.0, remaining))
-                    else:
-                        completed = True
-                finally:
-                    disable_output()
-                    controlled_test_running = False
-                    if client.has_socket_connection:
-                        slider.set_value(0.0)
-                        update_labels(0.0)
-                        enable_switch.set_value(False)
-                        enable_switch.enable()
-                        slider.disable()
-
-                        with recording_lock:
-                            must_finish_recording = recording
-                        if must_finish_recording:
-                            toggle_recording(controlled=True)
-
-                        record_button.enable()
-                        controlled_step_input.enable()
-                        controlled_test_view["button"] = (
-                            "INICIAR PRUEBA CONTROLADA"
-                        )
-                        controlled_test_view["status"] = (
-                            "PRUEBA COMPLETADA · PWM 0 % · CSV DESCARGADO"
-                            if completed
-                            else (
-                                "PRUEBA CANCELADA · PWM 0 % · "
-                                "CSV PARCIAL DESCARGADO"
-                            )
-                        )
-                        status_label.set_text("SALIDA APAGADA")
-                        status_label.classes(
-                            replace="text-h6 font-bold text-positive"
-                        )
-                    else:
-                        with recording_lock:
-                            recording = False
-                            recorded_rows.clear()
-                            recording_view["button"] = "INICIAR REGISTRO CSV"
-                            recording_view["status"] = (
-                                "REGISTRO CANCELADO POR DESCONEXIÓN"
-                            )
+                controlled_test_thread.start()
 
             ui.button(
                 on_click=toggle_controlled_test,
@@ -880,60 +1027,166 @@ def main() -> None:
                 "status",
             ).classes("text-subtitle2 text-grey-7")
 
-            def disconnect_client() -> None:
-                controlled_test_cancel.set()
-                disable_output()
-
-            client.on_disconnect(disconnect_client)
-        pwm_card.move(main_cards)
-
-        with ui.card().classes("w-full max-w-7xl"):
-            ui.label("SensorWatts").classes("text-h6 font-bold")
-            with ui.row().classes("w-full justify-between"):
-                with ui.column().classes("items-center"):
-                    ui.label("Voltaje").classes("text-caption")
-                    ui.label().bind_text_from(
-                        sensorwatts_view,
-                        "voltage",
-                    ).classes("text-h6")
-                with ui.column().classes("items-center"):
-                    ui.label("Corriente").classes("text-caption")
-                    ui.label().bind_text_from(
-                        sensorwatts_view,
-                        "current",
-                    ).classes("text-h6")
-                with ui.column().classes("items-center"):
-                    ui.label("FP").classes("text-caption")
-                    ui.label().bind_text_from(
-                        sensorwatts_view,
-                        "power_factor",
-                    ).classes("text-h6")
-                with ui.column().classes("items-center"):
-                    ui.label("Potencia activa").classes("text-caption")
-                    ui.label().bind_text_from(
-                        sensorwatts_view,
-                        "active_power",
-                    ).classes("text-h6")
-
-            ui.label().bind_text_from(
-                sensorwatts_view,
-                "status",
-            ).classes("text-subtitle1 text-grey-7")
-            ui.label().bind_text_from(
-                recording_view,
-                "status",
-            ).classes("text-subtitle1")
-
-            record_button = ui.button(
-                on_click=toggle_recording,
+            ui.button(
+                on_click=toggle_manual_recording,
             ).bind_text_from(
                 recording_view,
                 "button",
+            ).bind_enabled_from(
+                recording_view,
+                "manual_enabled",
+            ).classes("w-full")
+            ui.button(
+                "DESCARGAR ÚLTIMO CSV GUARDADO",
+                on_click=download_last_csv,
+            ).bind_visibility_from(
+                recording_view,
+                "has_saved_file",
+            ).classes("w-full")
+            ui.label().bind_text_from(
+                recording_view,
+                "status",
+            ).classes("text-caption text-grey-7")
+            ui.label(f"Directorio interno: {csv_dir}").classes(
+                "text-caption text-grey-7"
+            )
+
+        main_cards = ui.element("div").classes(
+            "grid grid-cols-1 lg:grid-cols-2 gap-4 "
+            "w-full max-w-7xl items-stretch"
+        )
+
+        with ui.card().classes("w-full h-full") as active_pwm_card:
+            ui.label("Control PWM").classes("text-h6 font-bold")
+            ui.label().bind_text_from(
+                pwm_view,
+                "logical",
+            ).classes("text-h3")
+            ui.label().bind_text_from(
+                pwm_view,
+                "physical",
+            ).classes("text-subtitle1")
+            ui.label().bind_text_from(
+                pwm_view,
+                "voltage",
+            ).classes("text-subtitle1")
+
+            active_slider = ui.slider(
+                min=0.0,
+                max=args.max_duty,
+                step=1.0,
+                value=float(pwm_view["slider"]),
+            ).classes("w-full")
+            active_slider.bind_value_from(pwm_view, "slider")
+            active_slider.bind_enabled_from(pwm_view, "slider_enabled")
+
+            active_enable_switch = ui.switch(
+                "Habilitar salida",
+                value=bool(pwm_view["enabled"]),
+            )
+            active_enable_switch.bind_value_from(pwm_view, "enabled")
+            active_enable_switch.bind_enabled_from(
+                pwm_view,
+                "manual_controls_enabled",
+            )
+            ui.label().bind_text_from(
+                pwm_view,
+                "status",
+            ).classes("text-h6 font-bold")
+
+            def change_active_duty(event) -> None:
+                if controlled_test_running:
+                    return
+                set_output(float(event.value), "SALIDA HABILITADA")
+
+            def change_active_enabled(event) -> None:
+                nonlocal enabled
+                if controlled_test_running:
+                    return
+                enabled = bool(event.value)
+                if enabled:
+                    set_output(
+                        float(active_slider.value),
+                        "SALIDA HABILITADA",
+                    )
+                else:
+                    disable_output("SALIDA APAGADA")
+
+            def active_emergency_stop() -> None:
+                controlled_test_cancel.set()
+                disable_output("PARO APLICADO · SALIDA 0 %")
+
+            active_slider.on_value_change(change_active_duty)
+            active_enable_switch.on_value_change(change_active_enabled)
+            ui.button(
+                "PARO · FORZAR 0 %",
+                on_click=active_emergency_stop,
+                color="negative",
             ).classes("w-full text-h6")
+        active_pwm_card.move(main_cards)
+
+        with chart_lock:
+            initial_times = [round(value, 1) for value in chart_times_s]
+            initial_temperatures = list(chart_temperatures_c)
+        chart_options = {
+            "animation": False,
+            "title": {"text": "Temperatura vs tiempo"},
+            "tooltip": {"trigger": "axis"},
+            "xAxis": {
+                "type": "category",
+                "name": "Tiempo (s)",
+                "data": initial_times,
+            },
+            "yAxis": {
+                "type": "value",
+                "name": "Temperatura (°C)",
+                "scale": True,
+            },
+            "series": [
+                {
+                    "name": "Temperatura",
+                    "type": "line",
+                    "showSymbol": False,
+                    "connectNulls": False,
+                    "data": initial_temperatures,
+                }
+            ],
+            "dataZoom": [
+                {"type": "inside"},
+                {"type": "slider"},
+            ],
+        }
+        with ui.card().classes("w-full h-full") as chart_card:
+            temperature_chart = ui.echart(chart_options).classes(
+                "w-full h-96"
+            )
+            ui.label(
+                "La gráfica comienza y se limpia al iniciar un registro "
+                "manual o una prueba controlada."
+            ).classes("text-caption text-grey-7")
+        chart_card.move(main_cards)
+
+        with ui_clients_lock:
+            ui_clients[client.id] = (client, temperature_chart)
+
+        def disconnect_client() -> None:
+            with ui_clients_lock:
+                ui_clients.pop(client.id, None)
+                another_client_connected = any(
+                    candidate[0].has_socket_connection
+                    for candidate in ui_clients.values()
+                )
+            if not controlled_test_running and not another_client_connected:
+                disable_output(
+                    "NAVEGADOR DESCONECTADO · SALIDA MANUAL 0 %"
+                )
+
+        client.on_disconnect(disconnect_client)
 
         ui.label(
-            "El voltaje mostrado es una estimación ideal del PWM físico. "
-            "Confirma el valor real con multímetro."
+            "La prueba controlada continúa en la Raspberry aunque el navegador "
+            "pierda conexión. El paro local de la página solo funciona mientras "
+            "el navegador esté conectado."
         ).classes("text-caption text-grey-7")
 
     print(

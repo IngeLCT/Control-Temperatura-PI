@@ -9,7 +9,6 @@ from urllib.request import urlopen
 class SensorWattsReading:
     voltage_v: float
     current_a: float
-    power_factor: float
     active_power_w: float
 
 
@@ -20,7 +19,6 @@ def parse_sensorwatts_reading(payload: object) -> SensorWattsReading:
     required_fields = {
         "voltaje": "voltaje",
         "corriente": "corriente",
-        "factorpot": "factor de potencia",
         "potencia": "potencia activa",
     }
     values: dict[str, float] = {}
@@ -37,7 +35,6 @@ def parse_sensorwatts_reading(payload: object) -> SensorWattsReading:
     return SensorWattsReading(
         voltage_v=values["voltaje"],
         current_a=values["corriente"],
-        power_factor=values["factorpot"],
         active_power_w=values["potencia"],
     )
 
