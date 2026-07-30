@@ -21,6 +21,16 @@ from control_temperatura_pi.sensors import (
 from control_temperatura_pi.sensorwatts import SensorWattsClient
 
 
+CONTROLLED_TEST_STEP_SECONDS = 180.0
+
+
+def controlled_test_levels() -> tuple[int, ...]:
+    return (
+        *range(10, 101, 10),
+        *range(90, 0, -10),
+    )
+
+
 def describe_error(error: Exception) -> str:
     message = str(error).strip()
     return (
@@ -245,6 +255,12 @@ def main() -> None:
         "status": "REGISTRO DETENIDO · 0 MUESTRAS",
         "button": "INICIAR REGISTRO CSV",
     }
+    controlled_test_running = False
+    controlled_test_cancel = threading.Event()
+    controlled_test_view = {
+        "status": "PRUEBA CONTROLADA DETENIDA · 19 PASOS · 57 MIN",
+        "button": "INICIAR PRUEBA CONTROLADA",
+    }
     csv_fields = [
         "Fecha",
         "Hora",
@@ -350,6 +366,7 @@ def main() -> None:
     sensorwatts_thread.start()
 
     def close_hardware() -> None:
+        controlled_test_cancel.set()
         disable_output()
         pwm.close()
         sensor_stop.set()
@@ -364,6 +381,66 @@ def main() -> None:
     def index() -> None:
         nonlocal enabled
         client = ui.context.client
+
+        def toggle_recording(*, controlled: bool = False) -> bool:
+            nonlocal recording, recording_started
+            if controlled_test_running and not controlled:
+                ui.notify(
+                    "El registro está administrado por la prueba controlada",
+                    type="warning",
+                )
+                return False
+
+            rows_to_download: list[dict[str, object]] | None = None
+            with recording_lock:
+                if recording:
+                    recording = False
+                    rows_to_download = list(recorded_rows)
+                    recorded_rows.clear()
+                    recording_view["button"] = "INICIAR REGISTRO CSV"
+                else:
+                    recorded_rows.clear()
+                    recording_started = time.monotonic()
+                    recording = True
+                    recording_view["button"] = "DETENER Y DESCARGAR CSV"
+                    recording_view["status"] = (
+                        "REGISTRANDO · ESPERANDO MUESTRAS"
+                    )
+
+            if rows_to_download is None:
+                return True
+
+            if not rows_to_download:
+                recording_view["status"] = "REGISTRO DETENIDO · SIN MUESTRAS"
+                ui.notify(
+                    "No se recibieron muestras válidas de SensorWatts",
+                    type="warning",
+                )
+                return True
+
+            output = io.StringIO(newline="")
+            writer = csv.DictWriter(output, fieldnames=csv_fields)
+            writer.writeheader()
+            writer.writerows(rows_to_download)
+            prefix = "prueba_controlada" if controlled else "sensorwatts"
+            filename = (
+                f"{prefix}_"
+                f"{datetime.now().astimezone():%Y%m%d_%H%M%S}.csv"
+            )
+            ui.download.content(
+                output.getvalue().encode("utf-8-sig"),
+                filename,
+                media_type="text/csv",
+            )
+            recording_view["status"] = (
+                f"DESCARGADO · {len(rows_to_download)} MUESTRAS · "
+                "REGISTRO LIMPIO"
+            )
+            ui.notify(
+                f"CSV descargado con {len(rows_to_download)} muestras",
+                type="positive",
+            )
+            return True
 
         ui.label("Prueba manual del control de fase").classes("text-h4 font-bold")
         mode = "GPIO REAL" if args.real else "SIMULACIÓN"
@@ -554,14 +631,18 @@ def main() -> None:
                 voltage_label.set_text(
                     f"Referencia estimada: "
                     f"{3.3 * physical_duty / 100.0:.2f} V"
-                )
+            )
 
             def change_duty(event) -> None:
+                if controlled_test_running:
+                    return
                 applied = set_output(float(event.value))
                 update_labels(applied)
 
             def change_enabled(event) -> None:
                 nonlocal enabled
+                if controlled_test_running:
+                    return
                 enabled = bool(event.value)
                 if enabled:
                     slider.enable()
@@ -582,6 +663,7 @@ def main() -> None:
                 update_labels(applied)
 
             def emergency_stop() -> None:
+                controlled_test_cancel.set()
                 slider.set_value(0.0)
                 enable_switch.set_value(False)
                 disable_output()
@@ -597,7 +679,144 @@ def main() -> None:
                 color="negative",
             ).classes("w-full text-h6")
 
+            async def toggle_controlled_test() -> None:
+                nonlocal controlled_test_running, enabled, recording
+                if controlled_test_running:
+                    controlled_test_cancel.set()
+                    controlled_test_view["button"] = "CANCELANDO PRUEBA..."
+                    controlled_test_view["status"] = (
+                        "CANCELACIÓN SOLICITADA · FORZANDO SALIDA 0 %"
+                    )
+                    disable_output()
+                    return
+
+                if args.max_duty < 100.0:
+                    ui.notify(
+                        "La prueba requiere --max-duty 100",
+                        type="warning",
+                    )
+                    return
+
+                with recording_lock:
+                    recording_in_progress = recording
+                if recording_in_progress:
+                    ui.notify(
+                        "Detén primero el registro CSV manual",
+                        type="warning",
+                    )
+                    return
+
+                with sensorwatts_lock:
+                    watts_available = (
+                        sensorwatts_reading is not None
+                        and time.monotonic() - sensorwatts_last_read < 5.0
+                    )
+                if not watts_available:
+                    ui.notify(
+                        "SensorWatts debe estar entregando mediciones válidas",
+                        type="warning",
+                    )
+                    return
+
+                controlled_test_running = True
+                controlled_test_cancel.clear()
+                controlled_test_view["button"] = "CANCELAR PRUEBA CONTROLADA"
+                controlled_test_view["status"] = "INICIANDO PRUEBA CONTROLADA"
+                record_button.disable()
+                enable_switch.set_value(True)
+                enable_switch.disable()
+                slider.disable()
+                enabled = True
+                set_output(0.0)
+                update_labels(0.0)
+                status_label.set_text("PRUEBA CONTROLADA ACTIVA")
+                status_label.classes(
+                    replace="text-h6 font-bold text-negative"
+                )
+
+                if not toggle_recording(controlled=True):
+                    controlled_test_cancel.set()
+
+                levels = controlled_test_levels()
+                completed = False
+                try:
+                    for stage, level in enumerate(levels, start=1):
+                        if controlled_test_cancel.is_set():
+                            break
+
+                        slider.set_value(float(level))
+                        applied = set_output(float(level))
+                        update_labels(applied)
+                        deadline = (
+                            time.monotonic() + CONTROLLED_TEST_STEP_SECONDS
+                        )
+
+                        while not controlled_test_cancel.is_set():
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                break
+                            seconds = int(remaining + 0.999)
+                            controlled_test_view["status"] = (
+                                f"PASO {stage}/{len(levels)} · "
+                                f"PWM {level} % · RESTAN {seconds} s"
+                            )
+                            await asyncio.sleep(min(1.0, remaining))
+                    else:
+                        completed = True
+                finally:
+                    disable_output()
+                    controlled_test_running = False
+                    if client.has_socket_connection:
+                        slider.set_value(0.0)
+                        update_labels(0.0)
+                        enable_switch.set_value(False)
+                        enable_switch.enable()
+                        slider.disable()
+
+                        with recording_lock:
+                            must_finish_recording = recording
+                        if must_finish_recording:
+                            toggle_recording(controlled=True)
+
+                        record_button.enable()
+                        controlled_test_view["button"] = (
+                            "INICIAR PRUEBA CONTROLADA"
+                        )
+                        controlled_test_view["status"] = (
+                            "PRUEBA COMPLETADA · PWM 0 % · CSV DESCARGADO"
+                            if completed
+                            else (
+                                "PRUEBA CANCELADA · PWM 0 % · "
+                                "CSV PARCIAL DESCARGADO"
+                            )
+                        )
+                        status_label.set_text("SALIDA APAGADA")
+                        status_label.classes(
+                            replace="text-h6 font-bold text-positive"
+                        )
+                    else:
+                        with recording_lock:
+                            recording = False
+                            recorded_rows.clear()
+                            recording_view["button"] = "INICIAR REGISTRO CSV"
+                            recording_view["status"] = (
+                                "REGISTRO CANCELADO POR DESCONEXIÓN"
+                            )
+
+            ui.button(
+                on_click=toggle_controlled_test,
+                color="primary",
+            ).bind_text_from(
+                controlled_test_view,
+                "button",
+            ).classes("w-full text-h6")
+            ui.label().bind_text_from(
+                controlled_test_view,
+                "status",
+            ).classes("text-subtitle2 text-grey-7")
+
             def disconnect_client() -> None:
+                controlled_test_cancel.set()
                 disable_output()
 
             client.on_disconnect(disconnect_client)
@@ -639,59 +858,6 @@ def main() -> None:
                 recording_view,
                 "status",
             ).classes("text-subtitle1")
-
-            def toggle_recording() -> None:
-                nonlocal recording, recording_started
-                rows_to_download: list[dict[str, object]] | None = None
-                with recording_lock:
-                    if recording:
-                        recording = False
-                        rows_to_download = list(recorded_rows)
-                        recorded_rows.clear()
-                        recording_view["button"] = "INICIAR REGISTRO CSV"
-                    else:
-                        recorded_rows.clear()
-                        recording_started = time.monotonic()
-                        recording = True
-                        recording_view["button"] = "DETENER Y DESCARGAR CSV"
-                        recording_view["status"] = (
-                            "REGISTRANDO · ESPERANDO MUESTRAS"
-                        )
-
-                if rows_to_download is None:
-                    return
-
-                if not rows_to_download:
-                    recording_view["status"] = (
-                        "REGISTRO DETENIDO · SIN MUESTRAS"
-                    )
-                    ui.notify(
-                        "No se recibieron muestras válidas de SensorWatts",
-                        type="warning",
-                    )
-                    return
-
-                output = io.StringIO(newline="")
-                writer = csv.DictWriter(output, fieldnames=csv_fields)
-                writer.writeheader()
-                writer.writerows(rows_to_download)
-                filename = (
-                    "sensorwatts_"
-                    f"{datetime.now().astimezone():%Y%m%d_%H%M%S}.csv"
-                )
-                ui.download.content(
-                    output.getvalue().encode("utf-8-sig"),
-                    filename,
-                    media_type="text/csv",
-                )
-                recording_view["status"] = (
-                    f"DESCARGADO · {len(rows_to_download)} MUESTRAS · "
-                    "REGISTRO LIMPIO"
-                )
-                ui.notify(
-                    f"CSV descargado con {len(rows_to_download)} muestras",
-                    type="positive",
-                )
 
             record_button = ui.button(
                 on_click=toggle_recording,
