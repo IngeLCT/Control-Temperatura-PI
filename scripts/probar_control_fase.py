@@ -374,7 +374,12 @@ def main() -> None:
             "la temperatura es solo una referencia y no utiliza PID."
         ).classes("text-subtitle1")
 
-        with ui.card().classes("w-full max-w-2xl"):
+        main_cards = ui.element("div").classes(
+            "grid grid-cols-1 lg:grid-cols-2 gap-4 "
+            "w-full max-w-7xl items-stretch"
+        )
+
+        with ui.card().classes("w-full h-full") as temperature_card:
             ui.label("Temperatura de referencia").classes("text-subtitle2")
             ui.label().bind_text_from(
                 sensor_view,
@@ -513,8 +518,9 @@ def main() -> None:
                 sensor_view,
                 "connect_enabled",
             ).classes("w-full")
+        temperature_card.move(main_cards)
 
-        with ui.card().classes("w-full max-w-2xl"):
+        with ui.card().classes("w-full h-full") as pwm_card:
             ui.label("Demanda térmica solicitada").classes("text-subtitle2")
             duty_label = ui.label("0.0 %").classes("text-h3")
             physical_label = ui.label("PWM físico: 100.0 %").classes(
@@ -593,8 +599,9 @@ def main() -> None:
                 disable_output()
 
             client.on_disconnect(disconnect_client)
+        pwm_card.move(main_cards)
 
-        with ui.card().classes("w-full max-w-2xl"):
+        with ui.card().classes("w-full max-w-7xl"):
             ui.label("SensorWatts").classes("text-h6 font-bold")
             with ui.row().classes("w-full justify-between"):
                 with ui.column().classes("items-center"):
