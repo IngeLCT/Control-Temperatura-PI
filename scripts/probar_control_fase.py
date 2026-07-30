@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import csv
 from datetime import datetime
 import io
@@ -124,6 +125,8 @@ def main() -> None:
         nonlocal sensor_connecting, sensor_temperature_c
         nonlocal sensor_error, sensor_last_read
         created_sensor = None
+        event_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(event_loop)
         try:
             sensor_config = load_config(args.config).sensor
             created_sensor = VernierGDXTCASensor(
@@ -157,8 +160,10 @@ def main() -> None:
                 sensor_connecting = False
                 sensor_error = str(error)
         finally:
-            if sensor_stop.is_set() and created_sensor is not None:
+            if created_sensor is not None:
                 created_sensor.close()
+            asyncio.set_event_loop(None)
+            event_loop.close()
 
     lock = threading.Lock()
     enabled = False
@@ -262,8 +267,6 @@ def main() -> None:
         disable_output()
         pwm.close()
         sensor_stop.set()
-        if sensor is not None:
-            sensor.close()
         if sensor_thread is not None:
             sensor_thread.join(timeout=2.0)
         sensorwatts_stop.set()
@@ -275,6 +278,7 @@ def main() -> None:
     def index() -> None:
         nonlocal enabled
         client = ui.context.client
+        client_timers = []
 
         ui.label("Prueba manual del control de fase").classes("text-h4 font-bold")
         mode = "GPIO REAL" if args.real else "SIMULACIÓN"
@@ -388,7 +392,7 @@ def main() -> None:
                         replace="text-subtitle1 text-positive"
                     )
 
-            ui.timer(0.5, update_temperature)
+            client_timers.append(ui.timer(0.5, update_temperature))
 
         with ui.card().classes("w-full max-w-2xl"):
             ui.label("Demanda térmica solicitada").classes("text-subtitle2")
@@ -467,6 +471,8 @@ def main() -> None:
 
             def disconnect_client() -> None:
                 disable_output()
+                for timer in client_timers:
+                    timer.cancel(with_current_invocation=True)
 
             client.on_disconnect(disconnect_client)
 
@@ -606,7 +612,7 @@ def main() -> None:
                         f"{elapsed_s:.0f} s"
                     )
 
-            ui.timer(0.5, update_sensorwatts)
+            client_timers.append(ui.timer(0.5, update_sensorwatts))
 
         ui.label(
             "El voltaje mostrado es una estimación ideal del PWM físico. "
