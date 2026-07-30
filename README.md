@@ -153,6 +153,29 @@ Para conectar además el Vernier configurado en la sección `[sensor]` de
 python scripts/probar_control_fase.py --real --sensor
 ```
 
+La opción `--sensor` solo habilita el botón
+`CONECTAR SENSOR DE TEMPERATURA`; el programa no abre automáticamente la
+conexión BLE al arrancar. La lectura comienza después de pulsar el botón. Si la
+conexión falla, la interfaz muestra el error y permite reintentar.
+
+La misma página consulta cada segundo el endpoint de `SensorWatts`
+`http://192.168.1.211/readings` y muestra voltaje, corriente, factor de potencia
+y potencia activa. El botón `INICIAR REGISTRO CSV` comienza a registrar solo
+desde ese momento. Al pulsar `DETENER Y DESCARGAR CSV`, la página descarga el
+archivo y limpia las muestras para permitir un registro nuevo.
+
+El CSV contiene fecha/hora, tiempo transcurrido, porcentaje lógico del slider,
+voltaje estimado de referencia, porcentaje PWM físico, temperatura, voltaje de
+red, corriente, factor de potencia y potencia activa. Solo se agrega una fila
+cuando se recibe una respuesta válida de `SensorWatts`.
+
+Si cambia la dirección del medidor, se puede indicar otro endpoint:
+
+```bash
+python scripts/probar_control_fase.py --real --sensor \
+  --sensorwatts-url http://192.168.1.211/readings
+```
+
 La interfaz queda en `http://IP_DE_LA_RASPBERRY:8081`. Para limitar una primera
 prueba, por ejemplo a 25 %, usar `--max-duty 25`.
 
