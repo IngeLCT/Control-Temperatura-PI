@@ -22,9 +22,9 @@ from control_temperatura_pi.sensors import (
 from control_temperatura_pi.sensorwatts import SensorWattsClient
 
 
-CONTROLLED_TEST_DEFAULT_STEP_MINUTES = 3
-CONTROLLED_TEST_MIN_STEP_MINUTES = 1
-CONTROLLED_TEST_MAX_STEP_MINUTES = 60
+CONTROLLED_TEST_DEFAULT_STEP_MINUTES = 3.0
+CONTROLLED_TEST_MIN_STEP_MINUTES = 0.1
+CONTROLLED_TEST_MAX_STEP_MINUTES = 60.0
 
 
 def controlled_test_levels(step_percent: int = 10) -> tuple[int, ...]:
@@ -37,10 +37,18 @@ def controlled_test_levels(step_percent: int = 10) -> tuple[int, ...]:
 
 
 def controlled_test_duration_minutes(
-    step_minutes: int,
+    step_minutes: float,
     step_percent: int = 10,
-) -> int:
+) -> float:
     return len(controlled_test_levels(step_percent)) * step_minutes
+
+
+def controlled_test_step_seconds(step_minutes: float) -> float:
+    return step_minutes * 60.0
+
+
+def format_minutes(minutes: float) -> str:
+    return f"{minutes:g}"
 
 
 def describe_error(error: Exception) -> str:
@@ -308,7 +316,9 @@ def main() -> None:
     controlled_test_view = {
         "status": (
             "PRUEBA CONTROLADA DETENIDA · 19 PASOS · "
-            f"{controlled_test_duration_minutes(CONTROLLED_TEST_DEFAULT_STEP_MINUTES)} MIN"
+            f"{format_minutes(controlled_test_duration_minutes(
+                CONTROLLED_TEST_DEFAULT_STEP_MINUTES
+            ))} MIN"
         ),
         "button": "INICIAR PRUEBA CONTROLADA",
         "controls_enabled": True,
@@ -564,13 +574,13 @@ def main() -> None:
                 break
 
     def run_controlled_test(
-        step_minutes: int,
+        step_minutes: float,
         step_percent: int,
         owner_id: str,
     ) -> None:
         nonlocal controlled_test_running, controlled_test_owner_id
         levels = controlled_test_levels(step_percent)
-        step_seconds = step_minutes * 60.0
+        step_seconds = controlled_test_step_seconds(step_minutes)
         completed = False
         try:
             for stage, level in enumerate(levels, start=1):
@@ -868,7 +878,7 @@ def main() -> None:
                     value=CONTROLLED_TEST_DEFAULT_STEP_MINUTES,
                     min=CONTROLLED_TEST_MIN_STEP_MINUTES,
                     max=CONTROLLED_TEST_MAX_STEP_MINUTES,
-                    step=1,
+                    step=0.1,
                 ).props("outlined").classes("grow")
                 pwm_step_input = ui.number(
                     label="Paso PWM (%)",
@@ -878,15 +888,15 @@ def main() -> None:
                     step=1,
                 ).props("outlined").classes("grow")
 
-            def selected_test_configuration() -> tuple[int, int] | None:
+            def selected_test_configuration() -> tuple[float, int] | None:
                 try:
                     raw_minutes = float(controlled_step_input.value)
                     raw_step = float(pwm_step_input.value)
                 except (TypeError, ValueError):
                     return None
-                if not raw_minutes.is_integer() or not raw_step.is_integer():
+                if not raw_step.is_integer():
                     return None
-                minutes = int(raw_minutes)
+                minutes = raw_minutes
                 step = int(raw_step)
                 if not (
                     CONTROLLED_TEST_MIN_STEP_MINUTES
@@ -908,7 +918,8 @@ def main() -> None:
                 stages = len(controlled_test_levels(step))
                 total = controlled_test_duration_minutes(minutes, step)
                 controlled_test_view["status"] = (
-                    f"PRUEBA DETENIDA · {stages} PASOS · {total} MIN"
+                    f"PRUEBA DETENIDA · {stages} PASOS · "
+                    f"{format_minutes(total)} MIN"
                 )
 
             controlled_step_input.on_value_change(
@@ -947,7 +958,7 @@ def main() -> None:
                 configuration = selected_test_configuration()
                 if configuration is None:
                     ui.notify(
-                        "Usa minutos enteros de 1 a 60 y un paso PWM "
+                        "Usa un tiempo de 0.1 a 60 minutos y un paso PWM "
                         "entero que divida exactamente 100 "
                         "(por ejemplo 5, 10, 20 o 25)",
                         type="warning",
@@ -1005,7 +1016,7 @@ def main() -> None:
                 total = controlled_test_duration_minutes(minutes, step)
                 controlled_test_view["status"] = (
                     f"INICIANDO · PASO {step} % · {stages} ETAPAS · "
-                    f"{total} MIN"
+                    f"{format_minutes(total)} MIN"
                 )
                 controlled_test_thread = threading.Thread(
                     target=run_controlled_test,

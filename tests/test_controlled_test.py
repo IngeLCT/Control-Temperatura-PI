@@ -4,6 +4,7 @@ from scripts.probar_control_fase import (
     CONTROLLED_TEST_DEFAULT_STEP_MINUTES,
     controlled_test_duration_minutes,
     controlled_test_levels,
+    controlled_test_step_seconds,
 )
 
 
@@ -65,6 +66,11 @@ class ControlledTestSequenceTests(unittest.TestCase):
         self.assertEqual(controlled_test_duration_minutes(5), 95)
         self.assertEqual(controlled_test_duration_minutes(1, 5), 39)
         self.assertEqual(controlled_test_duration_minutes(1, 20), 9)
+
+    def test_decimal_minutes_are_converted_to_seconds(self) -> None:
+        self.assertEqual(controlled_test_step_seconds(0.5), 30)
+        self.assertEqual(controlled_test_step_seconds(1.5), 90)
+        self.assertEqual(controlled_test_duration_minutes(0.5), 9.5)
 
 
 if __name__ == "__main__":

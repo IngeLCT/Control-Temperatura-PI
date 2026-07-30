@@ -177,13 +177,14 @@ voltaje estimado de referencia, porcentaje PWM físico, temperatura, voltaje de
 red, corriente y potencia activa. Solo se agrega una fila
 cuando se recibe una respuesta válida de `SensorWatts`.
 
-El campo `Tiempo por paso (minutos)` permite elegir un valor entero entre 1 y
-60; el valor predeterminado es 3. `Paso PWM (%)` acepta divisores enteros de
-100, por ejemplo 5, 10, 20 o 25. El botón `INICIAR PRUEBA CONTROLADA` inicia
-automáticamente el CSV interno y ejecuta una rampa que sube hasta 100 %, baja
-con el mismo paso y finalmente fuerza 0 %. Con paso 10 son 19 etapas; con paso
-5 son 39; con paso 20 son 9. La interfaz calcula la duración total según ambos
-campos.
+El campo `Tiempo por paso (minutos)` permite elegir valores decimales entre
+0.1 y 60; el valor predeterminado es 3. El tiempo se convierte internamente a
+segundos: por ejemplo, 0.5 minutos son 30 segundos y 1.5 minutos son 90
+segundos por etapa. `Paso PWM (%)` acepta divisores enteros de 100, por ejemplo
+5, 10, 20 o 25. El botón `INICIAR PRUEBA CONTROLADA` inicia automáticamente el
+CSV interno y ejecuta una rampa que sube hasta 100 %, baja con el mismo paso y
+finalmente fuerza 0 %. Con paso 10 son 19 etapas; con paso 5 son 39; con paso
+20 son 9. La interfaz calcula la duración total según ambos campos.
 
 Durante la prueba quedan bloqueados los campos, el slider, el interruptor de
 habilitación y el registro manual. `CANCELAR PRUEBA CONTROLADA` y el paro
