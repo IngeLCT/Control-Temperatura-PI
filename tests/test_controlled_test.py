@@ -1,7 +1,8 @@
 import unittest
 
 from scripts.probar_control_fase import (
-    CONTROLLED_TEST_STEP_SECONDS,
+    CONTROLLED_TEST_DEFAULT_STEP_MINUTES,
+    controlled_test_duration_minutes,
     controlled_test_levels,
 )
 
@@ -34,10 +35,17 @@ class ControlledTestSequenceTests(unittest.TestCase):
         )
 
     def test_sequence_duration_is_57_minutes(self) -> None:
-        total_seconds = (
-            len(controlled_test_levels()) * CONTROLLED_TEST_STEP_SECONDS
+        self.assertEqual(
+            controlled_test_duration_minutes(
+                CONTROLLED_TEST_DEFAULT_STEP_MINUTES
+            ),
+            57,
         )
-        self.assertEqual(total_seconds, 57 * 60)
+
+    def test_sequence_duration_uses_selected_minutes_per_step(self) -> None:
+        self.assertEqual(controlled_test_duration_minutes(1), 19)
+        self.assertEqual(controlled_test_duration_minutes(2), 38)
+        self.assertEqual(controlled_test_duration_minutes(5), 95)
 
 
 if __name__ == "__main__":

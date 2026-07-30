@@ -173,12 +173,15 @@ voltaje estimado de referencia, porcentaje PWM físico, temperatura, voltaje de
 red, corriente, factor de potencia y potencia activa. Solo se agrega una fila
 cuando se recibe una respuesta válida de `SensorWatts`.
 
-El botón `INICIAR PRUEBA CONTROLADA`, ubicado debajo del paro, inicia
-automáticamente el registro CSV y ejecuta una rampa escalonada de PWM. Mantiene
-cada nivel durante tres minutos, sube de 10 % a 100 %, baja de 90 % a 10 % y
-finalmente fuerza 0 %, detiene el registro y descarga el CSV. Son 19 etapas y
-aproximadamente 57 minutos. Durante la prueba quedan bloqueados el slider, el
-interruptor de habilitación y el registro manual. El botón cambia a
+El campo `Tiempo por paso (minutos)` permite elegir un valor entero entre 1 y
+60; el valor predeterminado es 3. El botón `INICIAR PRUEBA CONTROLADA`, ubicado
+debajo del paro, inicia automáticamente el registro CSV y ejecuta una rampa
+escalonada de PWM. Mantiene cada nivel durante el tiempo elegido, sube de 10 % a
+100 %, baja de 90 % a 10 % y finalmente fuerza 0 %, detiene el registro y
+descarga el CSV. Son 19 etapas: con 1 minuto por paso dura 19 minutos; con 2,
+38 minutos; con 3, 57 minutos; y con 5, 95 minutos. Durante la prueba quedan
+bloqueados el campo de tiempo, el slider, el interruptor de habilitación y el
+registro manual. El botón cambia a
 `CANCELAR PRUEBA CONTROLADA`; el paro forzado también cancela la secuencia,
 fuerza 0 % y descarga las muestras parciales. Si el navegador se desconecta, la
 salida se fuerza inmediatamente a 0 % y el registro se cancela sin intentar una

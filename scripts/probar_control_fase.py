@@ -21,7 +21,9 @@ from control_temperatura_pi.sensors import (
 from control_temperatura_pi.sensorwatts import SensorWattsClient
 
 
-CONTROLLED_TEST_STEP_SECONDS = 180.0
+CONTROLLED_TEST_DEFAULT_STEP_MINUTES = 3
+CONTROLLED_TEST_MIN_STEP_MINUTES = 1
+CONTROLLED_TEST_MAX_STEP_MINUTES = 60
 
 
 def controlled_test_levels() -> tuple[int, ...]:
@@ -29,6 +31,10 @@ def controlled_test_levels() -> tuple[int, ...]:
         *range(10, 101, 10),
         *range(90, 0, -10),
     )
+
+
+def controlled_test_duration_minutes(step_minutes: int) -> int:
+    return len(controlled_test_levels()) * step_minutes
 
 
 def describe_error(error: Exception) -> str:
@@ -258,7 +264,10 @@ def main() -> None:
     controlled_test_running = False
     controlled_test_cancel = threading.Event()
     controlled_test_view = {
-        "status": "PRUEBA CONTROLADA DETENIDA · 19 PASOS · 57 MIN",
+        "status": (
+            "PRUEBA CONTROLADA DETENIDA · 19 PASOS · "
+            f"{controlled_test_duration_minutes(CONTROLLED_TEST_DEFAULT_STEP_MINUTES)} MIN"
+        ),
         "button": "INICIAR PRUEBA CONTROLADA",
     }
     csv_fields = [
@@ -679,6 +688,35 @@ def main() -> None:
                 color="negative",
             ).classes("w-full text-h6")
 
+            controlled_step_input = ui.number(
+                label="Tiempo por paso (minutos)",
+                value=CONTROLLED_TEST_DEFAULT_STEP_MINUTES,
+                min=CONTROLLED_TEST_MIN_STEP_MINUTES,
+                max=CONTROLLED_TEST_MAX_STEP_MINUTES,
+                step=1,
+            ).props("outlined").classes("w-full")
+
+            def update_controlled_duration(event) -> None:
+                if controlled_test_running or event.value is None:
+                    return
+                value = float(event.value)
+                if not value.is_integer():
+                    return
+                minutes = int(value)
+                if not (
+                    CONTROLLED_TEST_MIN_STEP_MINUTES
+                    <= minutes
+                    <= CONTROLLED_TEST_MAX_STEP_MINUTES
+                ):
+                    return
+                total_minutes = controlled_test_duration_minutes(minutes)
+                controlled_test_view["status"] = (
+                    f"PRUEBA CONTROLADA DETENIDA · 19 PASOS · "
+                    f"{total_minutes} MIN"
+                )
+
+            controlled_step_input.on_value_change(update_controlled_duration)
+
             async def toggle_controlled_test() -> None:
                 nonlocal controlled_test_running, enabled, recording
                 if controlled_test_running:
@@ -718,11 +756,37 @@ def main() -> None:
                     )
                     return
 
+                try:
+                    raw_step_minutes = float(controlled_step_input.value)
+                except (TypeError, ValueError):
+                    raw_step_minutes = 0.0
+                if (
+                    not raw_step_minutes.is_integer()
+                    or not (
+                        CONTROLLED_TEST_MIN_STEP_MINUTES
+                        <= raw_step_minutes
+                        <= CONTROLLED_TEST_MAX_STEP_MINUTES
+                    )
+                ):
+                    ui.notify(
+                        "El tiempo por paso debe ser un número entero "
+                        "entre 1 y 60 minutos",
+                        type="warning",
+                    )
+                    return
+                step_minutes = int(raw_step_minutes)
+                step_seconds = step_minutes * 60.0
+                total_minutes = controlled_test_duration_minutes(step_minutes)
+
                 controlled_test_running = True
                 controlled_test_cancel.clear()
                 controlled_test_view["button"] = "CANCELAR PRUEBA CONTROLADA"
-                controlled_test_view["status"] = "INICIANDO PRUEBA CONTROLADA"
+                controlled_test_view["status"] = (
+                    f"INICIANDO · {step_minutes} MIN POR PASO · "
+                    f"{total_minutes} MIN EN TOTAL"
+                )
                 record_button.disable()
+                controlled_step_input.disable()
                 enable_switch.set_value(True)
                 enable_switch.disable()
                 slider.disable()
@@ -748,7 +812,7 @@ def main() -> None:
                         applied = set_output(float(level))
                         update_labels(applied)
                         deadline = (
-                            time.monotonic() + CONTROLLED_TEST_STEP_SECONDS
+                            time.monotonic() + step_seconds
                         )
 
                         while not controlled_test_cancel.is_set():
@@ -779,6 +843,7 @@ def main() -> None:
                             toggle_recording(controlled=True)
 
                         record_button.enable()
+                        controlled_step_input.enable()
                         controlled_test_view["button"] = (
                             "INICIAR PRUEBA CONTROLADA"
                         )
