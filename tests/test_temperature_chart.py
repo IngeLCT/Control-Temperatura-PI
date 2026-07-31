@@ -5,7 +5,9 @@ from pathlib import Path
 from scripts.probar_control_fase import (
     chart_display_series,
     load_temperature_chart_csv,
+    sensorwatts_csv_values,
 )
+from control_temperatura_pi.sensorwatts import SensorWattsReading
 
 
 class TemperatureChartTests(unittest.TestCase):
@@ -40,6 +42,48 @@ class TemperatureChartTests(unittest.TestCase):
 
         self.assertEqual(times, [0.0, 1.0, 2.0])
         self.assertEqual(temperatures, [24.5, None, 25.1])
+
+    def test_invalid_sensorwatts_sample_leaves_electrical_fields_empty(
+        self,
+    ) -> None:
+        self.assertEqual(
+            sensorwatts_csv_values(None),
+            {
+                "Voltaje_V": "",
+                "Corriente_A": "",
+                "Potencia_Activa_W": "",
+            },
+        )
+
+    def test_valid_sensorwatts_sample_is_formatted(self) -> None:
+        reading = SensorWattsReading(
+            voltage_v=123.456,
+            current_a=1.2345,
+            active_power_w=98.765,
+        )
+        self.assertEqual(
+            sensorwatts_csv_values(reading),
+            {
+                "Voltaje_V": "123.46",
+                "Corriente_A": "1.234",
+                "Potencia_Activa_W": "98.77",
+            },
+        )
+
+    def test_partial_sensorwatts_sample_keeps_valid_fields(self) -> None:
+        reading = SensorWattsReading(
+            voltage_v=None,
+            current_a=2.3456,
+            active_power_w=210.987,
+        )
+        self.assertEqual(
+            sensorwatts_csv_values(reading),
+            {
+                "Voltaje_V": "",
+                "Corriente_A": "2.346",
+                "Potencia_Activa_W": "210.99",
+            },
+        )
 
 
 if __name__ == "__main__":

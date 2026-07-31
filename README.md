@@ -174,8 +174,14 @@ el directorio con `--csv-dir`.
 El CSV contiene las columnas separadas `Fecha` (`DD-MM-YYYY`) y `Hora`
 (`HH:MM:SS`), además de tiempo transcurrido, porcentaje lógico del slider,
 voltaje estimado de referencia, porcentaje PWM físico, temperatura, voltaje de
-red, corriente y potencia activa. Solo se agrega una fila
-cuando se recibe una respuesta válida de `SensorWatts`.
+red, corriente y potencia activa. Se agrega una fila cada segundo mientras el
+registro está activo. Si SensorWatts entrega una lectura inválida o deja de
+responder, la fila conserva tiempo, PWM y temperatura. Cada campo eléctrico se
+valida por separado: por ejemplo, un voltaje inválido deja vacío `Voltaje_V`,
+pero conserva `Corriente_A` y `Potencia_Activa_W` si esos valores sí son
+numéricos. La Raspberry usa la última respuesta reciente recibida y el registro
+continúa; los campos vuelven a completarse automáticamente cuando SensorWatts se
+recupera. La prueba controlada y el reloj del CSV no requieren SensorWatts.
 
 El campo `Tiempo por paso (minutos)` permite elegir valores decimales entre
 0.1 y 60; el valor predeterminado es 3. El tiempo se convierte internamente a
@@ -207,8 +213,8 @@ un registro en curso, carga automáticamente `Tiempo_s` y `Temperatura_C` del
 último CSV guardado. Para mantener fluida la interfaz durante registros largos,
 la gráfica limita mediante muestreo la cantidad de puntos enviados al navegador;
 el CSV conserva todas las muestras sin recortes. La curva de temperatura se
-actualiza cada segundo mientras el registro está activo y no depende de que una
-consulta puntual a SensorWatts termine correctamente.
+actualiza con las mismas filas de un segundo mientras el registro está activo y
+no depende de que una consulta puntual a SensorWatts termine correctamente.
 
 Si cambia la dirección del medidor, se puede indicar otro endpoint:
 

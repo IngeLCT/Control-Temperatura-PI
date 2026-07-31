@@ -109,6 +109,28 @@ def load_temperature_chart_csv(
     return times_s, temperatures_c
 
 
+def sensorwatts_csv_values(reading) -> dict[str, str]:
+    if reading is None:
+        return {
+            "Voltaje_V": "",
+            "Corriente_A": "",
+            "Potencia_Activa_W": "",
+        }
+    return {
+        "Voltaje_V": (
+            "" if reading.voltage_v is None else f"{reading.voltage_v:.2f}"
+        ),
+        "Corriente_A": (
+            "" if reading.current_a is None else f"{reading.current_a:.3f}"
+        ),
+        "Potencia_Activa_W": (
+            ""
+            if reading.active_power_w is None
+            else f"{reading.active_power_w:.2f}"
+        ),
+    }
+
+
 def format_minutes(minutes: float) -> str:
     return f"{minutes:g}"
 
@@ -581,7 +603,7 @@ def main() -> None:
             chart_view["status"] = f"ÚLTIMO CSV GUARDADO · {saved_path.name}"
             return saved_path
 
-    def append_record(reading) -> None:
+    def append_record() -> None:
         nonlocal recording_samples
         with lock:
             logical_duty = requested_duty if enabled else 0.0
@@ -591,6 +613,21 @@ def main() -> None:
         )
         with sensor_lock:
             temperature = sensor_temperature_c
+        with sensorwatts_lock:
+            watts_freshness_limit = max(
+                3.0,
+                args.sensorwatts_timeout + 1.0,
+            )
+            watts_reading = (
+                sensorwatts_reading
+                if (
+                    sensorwatts_error is None
+                    and sensorwatts_reading is not None
+                    and time.monotonic() - sensorwatts_last_read
+                    <= watts_freshness_limit
+                )
+                else None
+            )
         now = datetime.now().astimezone()
         with recording_lock:
             if not recording or recording_writer is None:
@@ -606,9 +643,7 @@ def main() -> None:
                 "Temperatura_C": (
                     "" if temperature is None else f"{temperature:.2f}"
                 ),
-                "Voltaje_V": f"{reading.voltage_v:.2f}",
-                "Corriente_A": f"{reading.current_a:.3f}",
-                "Potencia_Activa_W": f"{reading.active_power_w:.2f}",
+                **sensorwatts_csv_values(watts_reading),
             }
             try:
                 recording_writer.writerow(row)
@@ -624,6 +659,11 @@ def main() -> None:
                 f"REGISTRANDO EN PI · {recording_samples} MUESTRAS · "
                 f"{elapsed_s:.0f} s"
             )
+        with chart_lock:
+            chart_times_s.append(elapsed_s)
+            chart_temperatures_c.append(temperature)
+        schedule_chart_update()
+
     def read_sensorwatts() -> None:
         nonlocal sensorwatts_reading, sensorwatts_error, sensorwatts_last_read
         while not sensorwatts_stop.is_set():
@@ -634,16 +674,35 @@ def main() -> None:
                     sensorwatts_error = None
                     sensorwatts_last_read = time.monotonic()
                     sensorwatts_view["voltage"] = (
-                        f"{reading.voltage_v:.2f} V"
+                        "--.-- V"
+                        if reading.voltage_v is None
+                        else f"{reading.voltage_v:.2f} V"
                     )
                     sensorwatts_view["current"] = (
-                        f"{reading.current_a:.3f} A"
+                        "--.--- A"
+                        if reading.current_a is None
+                        else f"{reading.current_a:.3f} A"
                     )
                     sensorwatts_view["active_power"] = (
-                        f"{reading.active_power_w:.2f} W"
+                        "--.-- W"
+                        if reading.active_power_w is None
+                        else f"{reading.active_power_w:.2f} W"
                     )
-                    sensorwatts_view["status"] = "SENSORWATTS CONECTADO"
-                append_record(reading)
+                    invalid_fields = [
+                        name
+                        for name, value in (
+                            ("VOLTAJE", reading.voltage_v),
+                            ("CORRIENTE", reading.current_a),
+                            ("POTENCIA", reading.active_power_w),
+                        )
+                        if value is None
+                    ]
+                    sensorwatts_view["status"] = (
+                        "SENSORWATTS CONECTADO"
+                        if not invalid_fields
+                        else "SENSORWATTS PARCIAL · SIN "
+                        + ", ".join(invalid_fields)
+                    )
             except Exception as error:
                 with sensorwatts_lock:
                     sensorwatts_error = describe_error(error)
@@ -653,20 +712,9 @@ def main() -> None:
             if sensorwatts_stop.wait(1.0):
                 break
 
-    def record_temperature_chart() -> None:
+    def record_csv_and_chart() -> None:
         while not chart_stop.is_set():
-            updated = False
-            with recording_lock:
-                if recording:
-                    elapsed_s = time.monotonic() - recording_started
-                    with sensor_lock:
-                        temperature = sensor_temperature_c
-                    with chart_lock:
-                        chart_times_s.append(elapsed_s)
-                        chart_temperatures_c.append(temperature)
-                    updated = True
-            if updated:
-                schedule_chart_update()
+            append_record()
             if chart_stop.wait(1.0):
                 break
 
@@ -726,8 +774,8 @@ def main() -> None:
     )
     sensorwatts_thread.start()
     chart_thread = threading.Thread(
-        target=record_temperature_chart,
-        name="temperature-chart-recorder",
+        target=record_csv_and_chart,
+        name="csv-and-temperature-recorder",
         daemon=True,
     )
     chart_thread.start()
@@ -1081,18 +1129,6 @@ def main() -> None:
                         type="warning",
                     )
                     return
-                with sensorwatts_lock:
-                    watts_available = (
-                        sensorwatts_reading is not None
-                        and time.monotonic() - sensorwatts_last_read < 5.0
-                    )
-                if not watts_available:
-                    ui.notify(
-                        "SensorWatts debe estar entregando mediciones válidas",
-                        type="warning",
-                    )
-                    return
-
                 minutes, step = configuration
                 full_cycle = bool(full_cycle_checkbox.value)
 

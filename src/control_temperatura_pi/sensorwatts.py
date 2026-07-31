@@ -2,40 +2,33 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 from urllib.request import urlopen
 
 
 @dataclass(frozen=True)
 class SensorWattsReading:
-    voltage_v: float
-    current_a: float
-    active_power_w: float
+    voltage_v: float | None
+    current_a: float | None
+    active_power_w: float | None
+
+
+def _optional_finite_float(payload: dict, field: str) -> float | None:
+    try:
+        value = float(payload[field])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
 
 
 def parse_sensorwatts_reading(payload: object) -> SensorWattsReading:
     if not isinstance(payload, dict):
         raise ValueError("SensorWatts no entregó un objeto JSON")
 
-    required_fields = {
-        "voltaje": "voltaje",
-        "corriente": "corriente",
-        "potencia": "potencia activa",
-    }
-    values: dict[str, float] = {}
-    for field, description in required_fields.items():
-        if field not in payload:
-            raise ValueError(f"SensorWatts no entregó el campo '{field}'")
-        try:
-            values[field] = float(payload[field])
-        except (TypeError, ValueError) as error:
-            raise ValueError(
-                f"El valor de {description} de SensorWatts no es numérico"
-            ) from error
-
     return SensorWattsReading(
-        voltage_v=values["voltaje"],
-        current_a=values["corriente"],
-        active_power_w=values["potencia"],
+        voltage_v=_optional_finite_float(payload, "voltaje"),
+        current_a=_optional_finite_float(payload, "corriente"),
+        active_power_w=_optional_finite_float(payload, "potencia"),
     )
 
 
