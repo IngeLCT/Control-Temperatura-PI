@@ -181,17 +181,20 @@ El campo `Tiempo por paso (minutos)` permite elegir valores decimales entre
 0.1 y 60; el valor predeterminado es 3. El tiempo se convierte internamente a
 segundos: por ejemplo, 0.5 minutos son 30 segundos y 1.5 minutos son 90
 segundos por etapa. `Paso PWM (%)` acepta divisores enteros de 100, por ejemplo
-5, 10, 20 o 25. El botón `INICIAR PRUEBA CONTROLADA` inicia automáticamente el
-CSV interno y ejecuta una rampa que sube hasta 100 %, baja con el mismo paso y
-finalmente fuerza 0 %. Con paso 10 son 19 etapas; con paso 5 son 39; con paso
-20 son 9. La interfaz calcula la duración total según ambos campos.
+5, 10, 20 o 25. Con `Ciclo completo` marcado, la prueba sube hasta 100 %,
+baja con el mismo paso y finalmente fuerza 0 %. Con la casilla desmarcada,
+solo sube hasta 100 %, mantiene ese nivel durante el tiempo configurado y
+después fuerza directamente 0 %. La interfaz calcula la cantidad de etapas y
+la duración total según el tiempo, el paso y el modo elegido.
 
-Durante la prueba quedan bloqueados los campos, el slider, el interruptor de
-habilitación y el registro manual. `CANCELAR PRUEBA CONTROLADA` y el paro
-detienen la secuencia y fuerzan 0 %. Si el navegador se desconecta, la Raspberry
-continúa la prueba y sigue guardando el CSV. Al finalizar intenta enviarlo a
-cualquier navegador conectado; si no existe uno, conserva el archivo y la
-interfaz permite descargarlo después con `DESCARGAR ÚLTIMO CSV GUARDADO`.
+La prueba controlada no inicia ni detiene automáticamente el registro CSV.
+El archivo se crea únicamente al pulsar `INICIAR REGISTRO CSV` y continúa
+recibiendo muestras hasta pulsar `DETENER Y DESCARGAR CSV`, incluso si la prueba
+termina o el navegador se desconecta. Al reconectar, la interfaz conserva el
+estado activo y permite detener el registro. Durante la prueba quedan bloqueados
+los campos, el slider y el interruptor de habilitación, pero el control del CSV
+permanece disponible. `CANCELAR PRUEBA CONTROLADA` y el paro detienen la
+secuencia y fuerzan 0 %.
 Fuera de la prueba controlada, la salida manual conserva el apagado de seguridad
 cuando se desconecta el último navegador.
 
@@ -199,7 +202,7 @@ La pantalla agrupa temperatura, voltaje, corriente y potencia activa en una
 tarjeta superior. Debajo aparecen lado a lado el control PWM y la gráfica
 `Temperatura vs tiempo`. La tarjeta con los controles de sensores, tiempos,
 paso PWM, prueba controlada y CSV queda debajo de ambos. La gráfica se limpia
-y comienza solo cuando inicia un registro manual o una prueba controlada.
+y comienza solo cuando inicia un registro CSV.
 
 Si cambia la dirección del medidor, se puede indicar otro endpoint:
 

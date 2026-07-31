@@ -27,20 +27,26 @@ CONTROLLED_TEST_MIN_STEP_MINUTES = 0.1
 CONTROLLED_TEST_MAX_STEP_MINUTES = 60.0
 
 
-def controlled_test_levels(step_percent: int = 10) -> tuple[int, ...]:
+def controlled_test_levels(
+    step_percent: int = 10,
+    full_cycle: bool = True,
+) -> tuple[int, ...]:
     if not 1 <= step_percent <= 100 or 100 % step_percent != 0:
         raise ValueError("El paso PWM debe dividir exactamente 100")
-    return (
-        *range(step_percent, 101, step_percent),
-        *range(100 - step_percent, 0, -step_percent),
-    )
+    ascending = tuple(range(step_percent, 101, step_percent))
+    if not full_cycle:
+        return ascending
+    return (*ascending, *range(100 - step_percent, 0, -step_percent))
 
 
 def controlled_test_duration_minutes(
     step_minutes: float,
     step_percent: int = 10,
+    full_cycle: bool = True,
 ) -> float:
-    return len(controlled_test_levels(step_percent)) * step_minutes
+    return (
+        len(controlled_test_levels(step_percent, full_cycle)) * step_minutes
+    )
 
 
 def controlled_test_step_seconds(step_minutes: float) -> float:
@@ -311,7 +317,6 @@ def main() -> None:
     }
     controlled_test_running = False
     controlled_test_thread = None
-    controlled_test_owner_id: str | None = None
     controlled_test_cancel = threading.Event()
     controlled_test_view = {
         "status": (
@@ -393,44 +398,6 @@ def main() -> None:
         loop = ui_loop
         if loop is not None and loop.is_running():
             loop.call_soon_threadsafe(update_connected_charts)
-
-    def attempt_owner_download(path: Path, owner_id: str | None) -> None:
-        if owner_id is None:
-            return
-
-        def download() -> None:
-            with ui_clients_lock:
-                entry = ui_clients.get(owner_id)
-                if entry is None:
-                    entry = next(
-                        (
-                            candidate
-                            for candidate in ui_clients.values()
-                            if candidate[0].has_socket_connection
-                        ),
-                        None,
-                    )
-            if entry is None:
-                recording_view["status"] = (
-                    f"CSV GUARDADO EN PI · DESCARGA PENDIENTE · {path.name}"
-                )
-                return
-            client, _ = entry
-            if not client.has_socket_connection:
-                recording_view["status"] = (
-                    f"CSV GUARDADO EN PI · DESCARGA PENDIENTE · {path.name}"
-                )
-                return
-            with client:
-                ui.download.file(path, filename=path.name, media_type="text/csv")
-                ui.notify(
-                    f"CSV guardado en la Raspberry y enviado: {path.name}",
-                    type="positive",
-                )
-
-        loop = ui_loop
-        if loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(download)
 
     def start_recording(prefix: str) -> bool:
         nonlocal recording, recording_started
@@ -532,7 +499,6 @@ def main() -> None:
                 recording_view["status"] = (
                     f"ERROR AL GUARDAR CSV: {describe_error(error)}"
                 )
-                controlled_test_cancel.set()
                 return
             recording_samples += 1
             recording_view["status"] = (
@@ -576,10 +542,10 @@ def main() -> None:
     def run_controlled_test(
         step_minutes: float,
         step_percent: int,
-        owner_id: str,
+        full_cycle: bool,
     ) -> None:
-        nonlocal controlled_test_running, controlled_test_owner_id
-        levels = controlled_test_levels(step_percent)
+        nonlocal controlled_test_running
+        levels = controlled_test_levels(step_percent, full_cycle)
         step_seconds = controlled_test_step_seconds(step_minutes)
         completed = False
         try:
@@ -611,21 +577,12 @@ def main() -> None:
                 else "PRUEBA CANCELADA · SALIDA 0 %"
             )
             disable_output(reason)
-            saved_path = finish_recording()
             controlled_test_running = False
-            controlled_test_owner_id = None
             pwm_view["manual_controls_enabled"] = True
             pwm_view["slider_enabled"] = False
             controlled_test_view["button"] = "INICIAR PRUEBA CONTROLADA"
             controlled_test_view["controls_enabled"] = True
-            controlled_test_view["status"] = (
-                f"{reason} · CSV GUARDADO EN PI"
-                if saved_path is not None
-                else f"{reason} · SIN CSV"
-            )
-            recording_view["manual_enabled"] = True
-            if saved_path is not None:
-                attempt_owner_download(saved_path, owner_id)
+            controlled_test_view["status"] = reason
 
     sensorwatts_thread = threading.Thread(
         target=read_sensorwatts,
@@ -652,17 +609,11 @@ def main() -> None:
     @ui.page("/")
     def index() -> None:
         nonlocal enabled, ui_loop
-        nonlocal controlled_test_thread, controlled_test_owner_id
+        nonlocal controlled_test_thread
         client = ui.context.client
         ui_loop = asyncio.get_running_loop()
 
         def toggle_manual_recording() -> None:
-            if controlled_test_running:
-                ui.notify(
-                    "El registro está administrado por la prueba controlada",
-                    type="warning",
-                )
-                return
             with recording_lock:
                 active = recording
             if active:
@@ -887,6 +838,10 @@ def main() -> None:
                     max=100,
                     step=1,
                 ).props("outlined").classes("grow")
+            full_cycle_checkbox = ui.checkbox(
+                "Ciclo completo",
+                value=True,
+            ).props("color=primary")
 
             def selected_test_configuration() -> tuple[float, int] | None:
                 try:
@@ -915,10 +870,20 @@ def main() -> None:
                 if configuration is None or controlled_test_running:
                     return
                 minutes, step = configuration
-                stages = len(controlled_test_levels(step))
-                total = controlled_test_duration_minutes(minutes, step)
+                full_cycle = bool(full_cycle_checkbox.value)
+                stages = len(controlled_test_levels(step, full_cycle))
+                total = controlled_test_duration_minutes(
+                    minutes,
+                    step,
+                    full_cycle,
+                )
+                route = (
+                    "0→100→0"
+                    if full_cycle
+                    else "0→100; RETORNO DIRECTO A 0"
+                )
                 controlled_test_view["status"] = (
-                    f"PRUEBA DETENIDA · {stages} PASOS · "
+                    f"PRUEBA DETENIDA · {route} · {stages} PASOS · "
                     f"{format_minutes(total)} MIN"
                 )
 
@@ -926,6 +891,9 @@ def main() -> None:
                 lambda: update_controlled_summary()
             )
             pwm_step_input.on_value_change(
+                lambda: update_controlled_summary()
+            )
+            full_cycle_checkbox.on_value_change(
                 lambda: update_controlled_summary()
             )
             controlled_step_input.bind_enabled_from(
@@ -936,10 +904,14 @@ def main() -> None:
                 controlled_test_view,
                 "controls_enabled",
             )
+            full_cycle_checkbox.bind_enabled_from(
+                controlled_test_view,
+                "controls_enabled",
+            )
 
             def toggle_controlled_test() -> None:
                 nonlocal controlled_test_running, controlled_test_thread
-                nonlocal controlled_test_owner_id, enabled
+                nonlocal enabled
                 if controlled_test_running:
                     controlled_test_cancel.set()
                     controlled_test_view["button"] = "CANCELANDO PRUEBA..."
@@ -964,14 +936,6 @@ def main() -> None:
                         type="warning",
                     )
                     return
-                with recording_lock:
-                    recording_in_progress = recording
-                if recording_in_progress:
-                    ui.notify(
-                        "Detén primero el registro CSV manual",
-                        type="warning",
-                    )
-                    return
                 with sensorwatts_lock:
                     watts_available = (
                         sensorwatts_reading is not None
@@ -985,42 +949,37 @@ def main() -> None:
                     return
 
                 minutes, step = configuration
-                try:
-                    if not start_recording("prueba_controlada"):
-                        ui.notify(
-                            "Ya existe un registro activo",
-                            type="warning",
-                        )
-                        return
-                except Exception as error:
-                    ui.notify(
-                        f"No fue posible crear el CSV interno: "
-                        f"{describe_error(error)}",
-                        type="negative",
-                    )
-                    return
+                full_cycle = bool(full_cycle_checkbox.value)
 
                 enabled = True
                 set_output(0.0, "PRUEBA CONTROLADA INICIANDO")
                 controlled_test_running = True
                 controlled_test_cancel.clear()
-                controlled_test_owner_id = client.id
                 pwm_view["manual_controls_enabled"] = False
                 pwm_view["slider_enabled"] = False
                 controlled_test_view["button"] = (
                     "CANCELAR PRUEBA CONTROLADA"
                 )
                 controlled_test_view["controls_enabled"] = False
-                recording_view["manual_enabled"] = False
-                stages = len(controlled_test_levels(step))
-                total = controlled_test_duration_minutes(minutes, step)
+                stages = len(controlled_test_levels(step, full_cycle))
+                total = controlled_test_duration_minutes(
+                    minutes,
+                    step,
+                    full_cycle,
+                )
+                route = (
+                    "0→100→0"
+                    if full_cycle
+                    else "0→100; RETORNO DIRECTO A 0"
+                )
                 controlled_test_view["status"] = (
-                    f"INICIANDO · PASO {step} % · {stages} ETAPAS · "
+                    f"INICIANDO · {route} · PASO {step} % · "
+                    f"{stages} ETAPAS · "
                     f"{format_minutes(total)} MIN"
                 )
                 controlled_test_thread = threading.Thread(
                     target=run_controlled_test,
-                    args=(minutes, step, client.id),
+                    args=(minutes, step, full_cycle),
                     name="controlled-pwm-test",
                     daemon=True,
                 )
@@ -1172,8 +1131,7 @@ def main() -> None:
                 "w-full h-96"
             )
             ui.label(
-                "La gráfica comienza y se limpia al iniciar un registro "
-                "manual o una prueba controlada."
+                "La gráfica comienza y se limpia al iniciar un registro CSV."
             ).classes("text-caption text-grey-7")
         chart_card.move(main_cards)
         controls_card.move()
