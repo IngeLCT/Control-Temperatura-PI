@@ -27,6 +27,8 @@ CONTROLLED_TEST_DEFAULT_STEP_MINUTES = 3.0
 CONTROLLED_TEST_MIN_STEP_MINUTES = 0.1
 CONTROLLED_TEST_MAX_STEP_MINUTES = 60.0
 CHART_MAX_DISPLAY_POINTS = 1200
+GDX_LOW_BATTERY_PERCENT = 20
+GDX_BATTERY_CHECK_INTERVAL_SECONDS = 300.0
 
 
 def controlled_test_levels(
@@ -78,6 +80,53 @@ def chart_display_series(
     )
 
 
+def temperature_plotly_figure(
+    times_s: list[float],
+    temperatures_c: list[float | None],
+    session_revision: int = 0,
+) -> dict[str, object]:
+    """Build the declarative Plotly figure used by every connected client."""
+    return {
+        "data": [
+            {
+                "type": "scatter",
+                "mode": "lines",
+                "name": "Temperatura",
+                "x": times_s,
+                "y": temperatures_c,
+                "connectgaps": False,
+                "line": {"color": "#e53935", "width": 2},
+                "hovertemplate": (
+                    "Tiempo: %{x:.1f} s<br>"
+                    "Temperatura: %{y:.2f} °C<extra></extra>"
+                ),
+            }
+        ],
+        "layout": {
+            "template": "plotly_white",
+            "title": {"text": "Temperatura vs tiempo", "x": 0.5},
+            "margin": {"l": 65, "r": 25, "t": 55, "b": 65},
+            "xaxis": {
+                "title": "Tiempo (s)",
+                "type": "linear",
+                "rangeslider": {"visible": True, "thickness": 0.08},
+            },
+            "yaxis": {
+                "title": "Temperatura (°C)",
+                "autorange": True,
+            },
+            "hovermode": "x unified",
+            "uirevision": f"temperature-session-{session_revision}",
+            "showlegend": False,
+        },
+        "config": {
+            "displaylogo": False,
+            "responsive": True,
+            "scrollZoom": True,
+        },
+    }
+
+
 def load_temperature_chart_csv(
     path: Path,
 ) -> tuple[list[float], list[float | None]]:
@@ -107,6 +156,30 @@ def load_temperature_chart_csv(
             times_s.append(elapsed_s)
             temperatures_c.append(temperature)
     return times_s, temperatures_c
+
+
+def list_saved_csv_paths(directory: Path) -> list[Path]:
+    """Return CSV files from the recording directory, newest first."""
+    if not directory.is_dir():
+        return []
+    dated_paths: list[tuple[float, Path]] = []
+    for path in directory.glob("*.csv"):
+        try:
+            dated_paths.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+    dated_paths.sort(key=lambda item: item[0], reverse=True)
+    return [path for _modified, path in dated_paths]
+
+
+def resolve_saved_csv_path(directory: Path, filename: str) -> Path | None:
+    """Resolve only a plain filename that exists in the recording directory."""
+    if not filename or Path(filename).name != filename:
+        return None
+    return next(
+        (path for path in list_saved_csv_paths(directory) if path.name == filename),
+        None,
+    )
 
 
 def sensorwatts_csv_values(reading) -> dict[str, str]:
@@ -240,6 +313,10 @@ def main() -> None:
     sensor_last_read = 0.0
     sensor_connecting = False
     sensor_scanning = False
+    gdx_battery_lock = threading.Lock()
+    gdx_battery_low = False
+    gdx_battery_warning_pending = False
+    gdx_battery_warning_percent: int | None = None
     sensor_view = {
         "temperature": "--.- °C",
         "status": (
@@ -306,6 +383,15 @@ def main() -> None:
                 sensor_view["connect_button"] = "SENSOR CONECTADO"
                 sensor_view["connect_enabled"] = False
                 sensor_view["scan_enabled"] = False
+            try:
+                observe_gdx_battery(
+                    created_sensor.read_battery_percent(refresh=False)
+                )
+            except Exception:
+                pass
+            next_battery_check = (
+                time.monotonic() + GDX_BATTERY_CHECK_INTERVAL_SECONDS
+            )
             while not sensor_stop.is_set():
                 try:
                     temperature = created_sensor.read_temperature_c()
@@ -323,6 +409,17 @@ def main() -> None:
                         )
                     if sensor_stop.wait(0.5):
                         break
+                now = time.monotonic()
+                if now >= next_battery_check:
+                    try:
+                        observe_gdx_battery(
+                            created_sensor.read_battery_percent(refresh=True)
+                        )
+                    except Exception:
+                        pass
+                    next_battery_check = (
+                        now + GDX_BATTERY_CHECK_INTERVAL_SECONDS
+                    )
         except Exception as error:
             with sensor_lock:
                 sensor_connecting = False
@@ -373,16 +470,11 @@ def main() -> None:
     recording_path: Path | None = None
     recording_samples = 0
     csv_dir = Path(args.csv_dir).expanduser().resolve()
-    existing_csv_files = (
-        list(csv_dir.glob("*.csv"))
-        if csv_dir.is_dir()
-        else []
+    existing_csv_files = list_saved_csv_paths(csv_dir)
+    last_saved_csv_path: Path | None = (
+        existing_csv_files[0] if existing_csv_files else None
     )
-    last_saved_csv_path: Path | None = max(
-        existing_csv_files,
-        key=lambda path: path.stat().st_mtime,
-        default=None,
-    )
+    selected_saved_csv_path = last_saved_csv_path
     recording_view = {
         "status": (
             f"ÚLTIMO CSV EN PI · {last_saved_csv_path.name}"
@@ -412,7 +504,15 @@ def main() -> None:
     chart_lock = threading.Lock()
     chart_times_s: list[float] = []
     chart_temperatures_c: list[float | None] = []
-    chart_view = {"status": "SIN DATOS PARA MOSTRAR"}
+    chart_view = {
+        "status": "SIN DATOS PARA MOSTRAR",
+        "selector_visible": True,
+        "selected_csv": (
+            last_saved_csv_path.name
+            if last_saved_csv_path is not None
+            else None
+        ),
+    }
     if last_saved_csv_path is not None:
         try:
             loaded_times, loaded_temperatures = load_temperature_chart_csv(
@@ -431,9 +531,12 @@ def main() -> None:
             )
     chart_schedule_lock = threading.Lock()
     chart_update_pending = False
+    chart_update_revision = 0
+    chart_session_revision = 0
     chart_stop = threading.Event()
     ui_clients_lock = threading.Lock()
     ui_clients: dict[str, tuple[object, object]] = {}
+    ui_csv_selectors: dict[str, object] = {}
     ui_loop: asyncio.AbstractEventLoop | None = None
     csv_fields = [
         "Fecha",
@@ -447,6 +550,69 @@ def main() -> None:
         "Corriente_A",
         "Potencia_Activa_W",
     ]
+
+    def deliver_gdx_battery_warning() -> None:
+        nonlocal gdx_battery_warning_pending
+        with gdx_battery_lock:
+            if (
+                not gdx_battery_warning_pending
+                or gdx_battery_warning_percent is None
+            ):
+                return
+            warning_percent = gdx_battery_warning_percent
+        with ui_clients_lock:
+            clients = list(ui_clients.values())
+        delivered = False
+        for client, _chart in clients:
+            if not client.has_socket_connection:
+                continue
+            try:
+                with client:
+                    ui.notify(
+                        "BATERÍA BAJA DEL SENSOR GDX: "
+                        f"{warning_percent} %. Recarga el sensor.",
+                        type="warning",
+                        close_button=True,
+                        timeout=0,
+                    )
+                delivered = True
+            except Exception:
+                continue
+        if delivered:
+            with gdx_battery_lock:
+                if gdx_battery_warning_percent == warning_percent:
+                    gdx_battery_warning_pending = False
+
+    def schedule_gdx_battery_warning() -> None:
+        loop = ui_loop
+        if loop is None or not loop.is_running():
+            return
+        loop.call_soon_threadsafe(deliver_gdx_battery_warning)
+
+    def observe_gdx_battery(percent: int | None) -> None:
+        nonlocal gdx_battery_low
+        nonlocal gdx_battery_warning_pending, gdx_battery_warning_percent
+        if percent is None:
+            return
+        low_now = percent < GDX_LOW_BATTERY_PERCENT
+        with gdx_battery_lock:
+            crossed_below = low_now and not gdx_battery_low
+            gdx_battery_low = low_now
+            gdx_battery_warning_percent = percent
+            if crossed_below:
+                gdx_battery_warning_pending = True
+            elif not low_now:
+                gdx_battery_warning_pending = False
+        if low_now:
+            schedule_gdx_battery_warning()
+
+    def reset_gdx_battery_warning() -> None:
+        nonlocal gdx_battery_low
+        nonlocal gdx_battery_warning_pending, gdx_battery_warning_percent
+        with gdx_battery_lock:
+            gdx_battery_low = False
+            gdx_battery_warning_pending = False
+            gdx_battery_warning_percent = None
 
     def update_pwm_view(logical_duty: float, status: str | None = None) -> None:
         physical_duty = logical_to_physical_duty(
@@ -484,30 +650,39 @@ def main() -> None:
 
     def update_connected_charts() -> None:
         nonlocal chart_update_pending
-        try:
+        while True:
+            with chart_schedule_lock:
+                requested_revision = chart_update_revision
             with chart_lock:
                 times, temperatures = chart_display_series(
                     chart_times_s,
                     chart_temperatures_c,
                 )
                 times = [round(value, 1) for value in times]
+                session_revision = chart_session_revision
+            figure = temperature_plotly_figure(
+                times,
+                temperatures,
+                session_revision,
+            )
             with ui_clients_lock:
                 clients = list(ui_clients.values())
             for client, chart in clients:
                 if not client.has_socket_connection:
                     continue
                 try:
-                    chart.options["xAxis"]["data"] = times
-                    chart.options["series"][0]["data"] = temperatures
-                    chart.update()
+                    chart.update_figure(figure)
                 except Exception:
                     continue
-        finally:
             with chart_schedule_lock:
-                chart_update_pending = False
+                if requested_revision == chart_update_revision:
+                    chart_update_pending = False
+                    return
 
     def schedule_chart_update() -> None:
-        nonlocal chart_update_pending
+        nonlocal chart_update_pending, chart_update_revision
+        with chart_schedule_lock:
+            chart_update_revision += 1
         loop = ui_loop
         if loop is None or not loop.is_running():
             return
@@ -517,15 +692,37 @@ def main() -> None:
             chart_update_pending = True
         loop.call_soon_threadsafe(update_connected_charts)
 
-    def show_last_saved_csv_on_chart() -> None:
-        path = last_saved_csv_path
+    def show_saved_csv_on_chart(filename: str | None = None) -> bool:
+        nonlocal chart_session_revision, selected_saved_csv_path
+        with recording_lock:
+            recording_active = recording
+        if recording_active or controlled_test_running:
+            return False
+        if filename is not None:
+            path = resolve_saved_csv_path(csv_dir, filename)
+            if path is None:
+                return False
+        else:
+            path = selected_saved_csv_path
+        if (
+            path is not None
+            and resolve_saved_csv_path(csv_dir, path.name) is None
+        ):
+            path = None
+        if path is None:
+            available_paths = list_saved_csv_paths(csv_dir)
+            path = available_paths[0] if available_paths else None
         if path is None:
             with chart_lock:
                 chart_times_s.clear()
                 chart_temperatures_c.clear()
+                chart_session_revision += 1
+                selected_saved_csv_path = None
+            chart_view["selected_csv"] = None
+            recording_view["samples"] = "0"
             chart_view["status"] = "SIN CSV GUARDADO PARA MOSTRAR"
             schedule_chart_update()
-            return
+            return True
         try:
             times, temperatures = load_temperature_chart_csv(path)
         except (OSError, ValueError) as error:
@@ -533,17 +730,48 @@ def main() -> None:
                 f"NO FUE POSIBLE CARGAR {path.name}: "
                 f"{describe_error(error)}"
             )
-            return
+            return False
         with chart_lock:
             chart_times_s[:] = times
             chart_temperatures_c[:] = temperatures
-        chart_view["status"] = f"ÚLTIMO CSV GUARDADO · {path.name}"
+            chart_session_revision += 1
+            selected_saved_csv_path = path
+        chart_view["selected_csv"] = path.name
+        recording_view["samples"] = str(len(times))
+        chart_view["status"] = f"CSV SELECCIONADO · {path.name}"
         schedule_chart_update()
+        return True
+
+    def update_connected_csv_selectors() -> None:
+        options = [path.name for path in list_saved_csv_paths(csv_dir)]
+        selected_name = chart_view["selected_csv"]
+        if selected_name not in options:
+            selected_name = options[0] if options else None
+            chart_view["selected_csv"] = selected_name
+        with ui_clients_lock:
+            selectors = [
+                (ui_clients[client_id][0], selector)
+                for client_id, selector in ui_csv_selectors.items()
+                if client_id in ui_clients
+            ]
+        for client, selector in selectors:
+            if not client.has_socket_connection:
+                continue
+            try:
+                selector.set_options(options, value=selected_name)
+            except Exception:
+                continue
+
+    def schedule_csv_selector_refresh() -> None:
+        loop = ui_loop
+        if loop is None or not loop.is_running():
+            return
+        loop.call_soon_threadsafe(update_connected_csv_selectors)
 
     def start_recording(prefix: str) -> bool:
         nonlocal recording, recording_started
         nonlocal recording_file, recording_writer, recording_path
-        nonlocal recording_samples
+        nonlocal recording_samples, chart_session_revision
         with recording_lock:
             if recording:
                 return False
@@ -575,15 +803,18 @@ def main() -> None:
             chart_view["status"] = (
                 f"GRÁFICA EN VIVO · {recording_path.name}"
             )
+            chart_view["selector_visible"] = False
             with chart_lock:
                 chart_times_s.clear()
                 chart_temperatures_c.clear()
+                chart_session_revision += 1
         schedule_chart_update()
         return True
 
     def finish_recording() -> Path | None:
         nonlocal recording, recording_file, recording_writer
         nonlocal recording_path, last_saved_csv_path
+        nonlocal selected_saved_csv_path
         with recording_lock:
             if not recording:
                 return None
@@ -599,6 +830,9 @@ def main() -> None:
             if saved_path is None:
                 return None
             last_saved_csv_path = saved_path
+            selected_saved_csv_path = saved_path
+            chart_view["selected_csv"] = saved_path.name
+            chart_view["selector_visible"] = not controlled_test_running
             recording_view["button"] = "INICIAR REGISTRO CSV"
             recording_view["has_saved_file"] = True
             recording_view["status"] = (
@@ -606,6 +840,7 @@ def main() -> None:
                 f"{saved_path.name}"
             )
             chart_view["status"] = f"ÚLTIMO CSV GUARDADO · {saved_path.name}"
+            schedule_csv_selector_refresh()
             return saved_path
 
     def append_record() -> None:
@@ -778,7 +1013,8 @@ def main() -> None:
             with recording_lock:
                 recording_active = recording
             if not recording_active:
-                show_last_saved_csv_on_chart()
+                chart_view["selector_visible"] = True
+                show_saved_csv_on_chart()
 
     sensorwatts_thread = threading.Thread(
         target=read_sensorwatts,
@@ -824,7 +1060,7 @@ def main() -> None:
                 saved_path = finish_recording()
                 if saved_path is not None:
                     if not controlled_test_running:
-                        show_last_saved_csv_on_chart()
+                        show_saved_csv_on_chart()
                     ui.download.file(
                         saved_path,
                         filename=saved_path.name,
@@ -1018,6 +1254,7 @@ def main() -> None:
                     sensor_view["connect_button"] = "CONECTANDO..."
                     sensor_view["connect_enabled"] = False
                     sensor_view["scan_enabled"] = False
+                reset_gdx_battery_warning()
                 sensor_select.disable()
                 sensor_thread = threading.Thread(
                     target=connect_and_read_sensor,
@@ -1137,7 +1374,7 @@ def main() -> None:
 
             def toggle_controlled_test() -> None:
                 nonlocal controlled_test_running, controlled_test_thread
-                nonlocal enabled
+                nonlocal enabled, chart_session_revision
                 if controlled_test_running:
                     controlled_test_cancel.set()
                     controlled_test_view["button"] = "CANCELANDO PRUEBA..."
@@ -1166,12 +1403,14 @@ def main() -> None:
                 minutes, step = configuration
                 full_cycle = bool(full_cycle_checkbox.value)
 
+                chart_view["selector_visible"] = False
                 with recording_lock:
                     recording_active = recording
                 if not recording_active:
                     with chart_lock:
                         chart_times_s.clear()
                         chart_temperatures_c.clear()
+                        chart_session_revision += 1
                     chart_view["status"] = (
                         "PRUEBA EN CURSO · INICIA REGISTRO CSV PARA GRAFICAR"
                     )
@@ -1331,51 +1570,63 @@ def main() -> None:
                 chart_temperatures_c,
             )
             initial_times = [round(value, 1) for value in initial_times]
-        chart_options = {
-            "animation": False,
-            "title": {"text": "Temperatura vs tiempo"},
-            "tooltip": {"trigger": "axis"},
-            "xAxis": {
-                "type": "category",
-                "name": "Tiempo (s)",
-                "data": initial_times,
-            },
-            "yAxis": {
-                "type": "value",
-                "name": "Temperatura (°C)",
-                "scale": True,
-            },
-            "series": [
-                {
-                    "name": "Temperatura",
-                    "type": "line",
-                    "showSymbol": False,
-                    "connectNulls": False,
-                    "data": initial_temperatures,
-                }
-            ],
-            "dataZoom": [
-                {"type": "inside"},
-                {"type": "slider"},
-            ],
-        }
+            initial_session_revision = chart_session_revision
+        chart_figure = temperature_plotly_figure(
+            initial_times,
+            initial_temperatures,
+            initial_session_revision,
+        )
+
+        def select_saved_csv(event) -> None:
+            filename = str(event.value or "").strip()
+            if not show_saved_csv_on_chart(filename):
+                ui.notify(
+                    "No fue posible cargar el CSV seleccionado",
+                    type="warning",
+                )
+
+        available_csv_names = [
+            path.name for path in list_saved_csv_paths(csv_dir)
+        ]
+        selected_csv_name = chart_view["selected_csv"]
+        if selected_csv_name not in available_csv_names:
+            selected_csv_name = (
+                available_csv_names[0] if available_csv_names else None
+            )
         with ui.card().classes("w-full h-full") as chart_card:
-            temperature_chart = ui.echart(chart_options).classes(
+            temperature_chart = ui.plotly(chart_figure).classes(
                 "w-full h-96"
             )
             ui.label().bind_text_from(
                 chart_view,
                 "status",
             ).classes("text-caption text-grey-7")
+            csv_chart_selector = ui.select(
+                options=available_csv_names,
+                value=selected_csv_name,
+                label="CSV guardado para mostrar",
+                on_change=select_saved_csv,
+            ).props("outlined dense").classes("w-full")
+            csv_chart_selector.bind_visibility_from(
+                chart_view,
+                "selector_visible",
+            )
+            csv_chart_selector.bind_value_from(
+                chart_view,
+                "selected_csv",
+            )
         chart_card.move(main_cards)
         controls_card.move()
 
         with ui_clients_lock:
             ui_clients[client.id] = (client, temperature_chart)
+            ui_csv_selectors[client.id] = csv_chart_selector
+        schedule_gdx_battery_warning()
 
         def disconnect_client() -> None:
             with ui_clients_lock:
                 ui_clients.pop(client.id, None)
+                ui_csv_selectors.pop(client.id, None)
                 another_client_connected = any(
                     candidate[0].has_socket_connection
                     for candidate in ui_clients.values()

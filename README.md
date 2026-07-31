@@ -162,6 +162,14 @@ comienza exactamente con `GDX`. Después se elige uno y se pulsa
 Si el escaneo o la conexión fallan, la interfaz muestra el error y permite
 reintentar.
 
+La aplicación consulta el nivel de batería informado por el GDX al conectarlo y
+lo actualiza cada cinco minutos desde el mismo hilo Bluetooth de temperatura.
+No muestra un indicador permanente. Cuando el nivel cruza de 20 % o más a un
+valor menor de 20 %, presenta una sola advertencia para recargar el sensor. Si
+en ese momento no hay navegador conectado, la advertencia queda pendiente y se
+muestra al volver a abrir la página. Una falla al consultar la batería no
+interrumpe las lecturas de temperatura, la prueba controlada ni el CSV.
+
 La misma página consulta cada segundo el endpoint de `SensorWatts`
 `http://192.168.1.211/readings` y muestra voltaje, corriente y potencia activa.
 El botón `INICIAR REGISTRO CSV` comienza a registrar solo
@@ -211,10 +219,18 @@ Los tres indicadores usan el estado de la Raspberry y se recuperan al volver a
 conectar el navegador. Debajo aparecen lado a lado el control PWM y la gráfica
 `Temperatura vs tiempo`. La tarjeta con los controles de sensores, tiempos,
 paso PWM, prueba controlada y CSV queda debajo de ambos. La gráfica se limpia
-y comienza en vivo cuando inicia un registro CSV. Cuando no hay una prueba ni
-un registro en curso, carga automáticamente `Tiempo_s` y `Temperatura_C` del
-último CSV guardado. Para mantener fluida la interfaz durante registros largos,
-la gráfica limita mediante muestreo la cantidad de puntos enviados al navegador;
+y comienza una sesión Plotly nueva desde cero cuando inicia un registro CSV.
+Iniciar después la prueba controlada no borra esa sesión: la curva continúa
+creciendo hasta detener manualmente el registro. Plotly conserva el zoom y el
+desplazamiento durante una misma sesión, pero restablece la vista al comenzar
+un CSV nuevo. Cuando no hay una prueba ni un registro en curso, carga
+automáticamente `Tiempo_s` y `Temperatura_C` del último CSV guardado y muestra
+un selector dentro de la tarjeta para cambiar entre todos los CSV disponibles.
+El selector se oculta mientras haya una prueba controlada o un registro activo,
+y vuelve a aparecer al terminar ambos. Un CSV recién guardado se agrega a la
+lista y queda seleccionado automáticamente. Para
+mantener fluida la interfaz durante registros largos, la gráfica limita mediante
+muestreo la cantidad de puntos enviados al navegador;
 el CSV conserva todas las muestras sin recortes. La curva de temperatura se
 actualiza con las mismas filas de un segundo mientras el registro está activo y
 no depende de que una consulta puntual a SensorWatts termine correctamente.

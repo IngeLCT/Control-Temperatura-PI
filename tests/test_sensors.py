@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from control_temperatura_pi.sensors import (
+    VernierGDXTCASensor,
     discover_vernier_device_names,
     filter_device_names,
     select_device_by_name,
@@ -82,6 +83,68 @@ class DeviceSelectionTests(unittest.TestCase):
         devices = [SimpleNamespace(name="GDX-TCA OTRO")]
         selected = select_device_by_name(devices, "GDX-TCA 1C1002R9")
         self.assertIsNone(selected)
+
+
+class VernierBatteryTests(unittest.TestCase):
+    def test_reads_and_refreshes_battery_percentage(self) -> None:
+        calls: dict[str, int] = {"status": 0}
+
+        class FakeChannel:
+            values: list[float] = []
+
+            def clear(self) -> None:
+                self.values.clear()
+
+        class FakeDevice:
+            name = "GDX-TCA PRUEBA"
+            battery_level_percent = 18
+
+            def open(self, auto_start: bool) -> bool:
+                return True
+
+            def start(self, period: int) -> None:
+                pass
+
+            def get_enabled_sensors(self) -> list[FakeChannel]:
+                return [FakeChannel()]
+
+            def _GDX_get_status(self) -> bool:
+                calls["status"] += 1
+                self.battery_level_percent = 17
+                return True
+
+            def stop(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        device = FakeDevice()
+
+        class FakeGoDirect:
+            def __init__(self, **kwargs) -> None:
+                pass
+
+            def list_devices(self) -> list[FakeDevice]:
+                return [device]
+
+            def quit(self) -> None:
+                pass
+
+        fake_module = SimpleNamespace(GoDirect=FakeGoDirect)
+        with patch.dict("sys.modules", {"godirect": fake_module}):
+            sensor = VernierGDXTCASensor(
+                connection="ble",
+                sample_period_ms=1000,
+                device_name="GDX-TCA PRUEBA",
+            )
+            try:
+                self.assertEqual(sensor.read_battery_percent(refresh=False), 18)
+                self.assertEqual(sensor.read_battery_percent(refresh=True), 17)
+            finally:
+                sensor.close()
+
+        self.assertEqual(calls["status"], 1)
 
 
 if __name__ == "__main__":

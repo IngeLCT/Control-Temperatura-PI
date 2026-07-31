@@ -140,6 +140,24 @@ class VernierGDXTCASensor:
         self._sensor.clear()
         return value
 
+    def read_battery_percent(self, refresh: bool = True) -> int | None:
+        """Return the GDX battery percentage, refreshing its status if requested."""
+        if refresh:
+            # godirect 1.2.1 only refreshes this public property through its
+            # internal status command. Keep the call in the same BLE thread as
+            # temperature reads to avoid concurrent access to the device.
+            refresh_status = getattr(self._device, "_GDX_get_status", None)
+            if not callable(refresh_status) or not refresh_status():
+                raise RuntimeError(
+                    "No fue posible actualizar la batería del Vernier"
+                )
+        raw_value = getattr(self._device, "battery_level_percent", None)
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            return None
+        return value if 0 <= value <= 100 else None
+
     def close(self) -> None:
         device = getattr(self, "_device", None)
         godirect = getattr(self, "_godirect", None)

@@ -1,16 +1,62 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
 from scripts.probar_control_fase import (
     chart_display_series,
+    list_saved_csv_paths,
     load_temperature_chart_csv,
+    resolve_saved_csv_path,
     sensorwatts_csv_values,
+    temperature_plotly_figure,
 )
 from control_temperatura_pi.sensorwatts import SensorWattsReading
 
 
 class TemperatureChartTests(unittest.TestCase):
+    def test_lists_saved_csv_files_newest_first_and_resolves_safely(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            csv_dir = Path(directory)
+            older = csv_dir / "anterior.csv"
+            newer = csv_dir / "reciente.csv"
+            ignored = csv_dir / "nota.txt"
+            older.write_text("Tiempo_s,Temperatura_C\n", encoding="utf-8")
+            newer.write_text("Tiempo_s,Temperatura_C\n", encoding="utf-8")
+            ignored.write_text("no es csv", encoding="utf-8")
+            os.utime(older, (100.0, 100.0))
+            os.utime(newer, (200.0, 200.0))
+
+            self.assertEqual(
+                list_saved_csv_paths(csv_dir),
+                [newer, older],
+            )
+            self.assertEqual(
+                resolve_saved_csv_path(csv_dir, "anterior.csv"),
+                older,
+            )
+            self.assertIsNone(
+                resolve_saved_csv_path(csv_dir, "../anterior.csv")
+            )
+            self.assertIsNone(resolve_saved_csv_path(csv_dir, "nota.txt"))
+
+    def test_builds_plotly_figure_for_temperature_series(self) -> None:
+        figure = temperature_plotly_figure(
+            [0.0, 1.0],
+            [24.5, 25.0],
+            session_revision=3,
+        )
+
+        trace = figure["data"][0]
+        self.assertEqual(trace["type"], "scatter")
+        self.assertEqual(trace["x"], [0.0, 1.0])
+        self.assertEqual(trace["y"], [24.5, 25.0])
+        self.assertFalse(trace["connectgaps"])
+        self.assertEqual(
+            figure["layout"]["uirevision"],
+            "temperature-session-3",
+        )
+
     def test_display_series_limits_points_and_preserves_ends(self) -> None:
         times = [float(value) for value in range(20)]
         temperatures = [float(value + 20) for value in range(20)]
