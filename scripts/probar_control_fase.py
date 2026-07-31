@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import csv
 from datetime import datetime
-import math
 from pathlib import Path
 import threading
 import time
@@ -26,7 +25,6 @@ from control_temperatura_pi.sensorwatts import SensorWattsClient
 CONTROLLED_TEST_DEFAULT_STEP_MINUTES = 3.0
 CONTROLLED_TEST_MIN_STEP_MINUTES = 0.1
 CONTROLLED_TEST_MAX_STEP_MINUTES = 60.0
-CHART_MAX_DISPLAY_POINTS = 1200
 GDX_LOW_BATTERY_PERCENT = 20
 GDX_BATTERY_CHECK_INTERVAL_SECONDS = 300.0
 
@@ -60,24 +58,10 @@ def controlled_test_step_seconds(step_minutes: float) -> float:
 def chart_display_series(
     times_s: list[float],
     temperatures_c: list[float | None],
-    max_points: int = CHART_MAX_DISPLAY_POINTS,
 ) -> tuple[list[float], list[float | None]]:
     if len(times_s) != len(temperatures_c):
         raise ValueError("Las series de la gráfica deben tener igual longitud")
-    if max_points < 2:
-        raise ValueError("La gráfica requiere al menos 2 puntos máximos")
-    if len(times_s) <= max_points:
-        return list(times_s), list(temperatures_c)
-
-    last_index = len(times_s) - 1
-    indexes = [
-        math.floor(position * last_index / (max_points - 1))
-        for position in range(max_points)
-    ]
-    return (
-        [times_s[index] for index in indexes],
-        [temperatures_c[index] for index in indexes],
-    )
+    return list(times_s), list(temperatures_c)
 
 
 def temperature_plotly_figure(
@@ -89,7 +73,7 @@ def temperature_plotly_figure(
     return {
         "data": [
             {
-                "type": "scatter",
+                "type": "scattergl",
                 "mode": "lines",
                 "name": "Temperatura",
                 "x": times_s,
@@ -536,6 +520,7 @@ def main() -> None:
     chart_stop = threading.Event()
     ui_clients_lock = threading.Lock()
     ui_clients: dict[str, tuple[object, object]] = {}
+    ui_chart_states: dict[str, tuple[int, int]] = {}
     ui_csv_selectors: dict[str, object] = {}
     ui_loop: asyncio.AbstractEventLoop | None = None
     csv_fields = [
@@ -660,20 +645,52 @@ def main() -> None:
                 )
                 times = [round(value, 1) for value in times]
                 session_revision = chart_session_revision
-            figure = temperature_plotly_figure(
-                times,
-                temperatures,
-                session_revision,
-            )
             with ui_clients_lock:
-                clients = list(ui_clients.values())
-            for client, chart in clients:
+                clients = [
+                    (
+                        client_id,
+                        client,
+                        chart,
+                        ui_chart_states.get(client_id, (-1, 0)),
+                    )
+                    for client_id, (client, chart) in ui_clients.items()
+                ]
+            full_figure: dict[str, object] | None = None
+            for client_id, client, chart, chart_state in clients:
                 if not client.has_socket_connection:
                     continue
+                rendered_session, rendered_count = chart_state
                 try:
-                    chart.update_figure(figure)
+                    if (
+                        rendered_session != session_revision
+                        or rendered_count > len(times)
+                    ):
+                        if full_figure is None:
+                            full_figure = temperature_plotly_figure(
+                                times,
+                                temperatures,
+                                session_revision,
+                            )
+                        chart.update_figure(full_figure)
+                    elif rendered_count < len(times):
+                        chart.run_plot_method(
+                            "extendTraces",
+                            {
+                                "x": [times[rendered_count:]],
+                                "y": [temperatures[rendered_count:]],
+                            },
+                            [0],
+                        )
+                    else:
+                        continue
                 except Exception:
                     continue
+                with ui_clients_lock:
+                    if client_id in ui_clients:
+                        ui_chart_states[client_id] = (
+                            session_revision,
+                            len(times),
+                        )
             with chart_schedule_lock:
                 if requested_revision == chart_update_revision:
                     chart_update_pending = False
@@ -1620,12 +1637,17 @@ def main() -> None:
 
         with ui_clients_lock:
             ui_clients[client.id] = (client, temperature_chart)
+            ui_chart_states[client.id] = (
+                initial_session_revision,
+                len(initial_times),
+            )
             ui_csv_selectors[client.id] = csv_chart_selector
         schedule_gdx_battery_warning()
 
         def disconnect_client() -> None:
             with ui_clients_lock:
                 ui_clients.pop(client.id, None)
+                ui_chart_states.pop(client.id, None)
                 ui_csv_selectors.pop(client.id, None)
                 another_client_connected = any(
                     candidate[0].has_socket_connection

@@ -48,7 +48,7 @@ class TemperatureChartTests(unittest.TestCase):
         )
 
         trace = figure["data"][0]
-        self.assertEqual(trace["type"], "scatter")
+        self.assertEqual(trace["type"], "scattergl")
         self.assertEqual(trace["x"], [0.0, 1.0])
         self.assertEqual(trace["y"], [24.5, 25.0])
         self.assertFalse(trace["connectgaps"])
@@ -57,21 +57,20 @@ class TemperatureChartTests(unittest.TestCase):
             "temperature-session-3",
         )
 
-    def test_display_series_limits_points_and_preserves_ends(self) -> None:
-        times = [float(value) for value in range(20)]
-        temperatures = [float(value + 20) for value in range(20)]
+    def test_display_series_preserves_every_temperature_point(self) -> None:
+        times = [float(value) for value in range(2500)]
+        temperatures = [float(value + 20) for value in range(2500)]
 
         shown_times, shown_temperatures = chart_display_series(
             times,
             temperatures,
-            max_points=5,
         )
 
-        self.assertEqual(len(shown_times), 5)
+        self.assertEqual(len(shown_times), 2500)
         self.assertEqual(shown_times[0], 0.0)
-        self.assertEqual(shown_times[-1], 19.0)
+        self.assertEqual(shown_times[-1], 2499.0)
         self.assertEqual(shown_temperatures[0], 20.0)
-        self.assertEqual(shown_temperatures[-1], 39.0)
+        self.assertEqual(shown_temperatures[-1], 2519.0)
 
     def test_loads_time_and_temperature_from_saved_csv(self) -> None:
         content = (

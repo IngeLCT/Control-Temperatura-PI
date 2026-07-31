@@ -228,12 +228,14 @@ automáticamente `Tiempo_s` y `Temperatura_C` del último CSV guardado y muestra
 un selector dentro de la tarjeta para cambiar entre todos los CSV disponibles.
 El selector se oculta mientras haya una prueba controlada o un registro activo,
 y vuelve a aparecer al terminar ambos. Un CSV recién guardado se agrega a la
-lista y queda seleccionado automáticamente. Para
-mantener fluida la interfaz durante registros largos, la gráfica limita mediante
-muestreo la cantidad de puntos enviados al navegador;
-el CSV conserva todas las muestras sin recortes. La curva de temperatura se
-actualiza con las mismas filas de un segundo mientras el registro está activo y
-no depende de que una consulta puntual a SensorWatts termine correctamente.
+lista y queda seleccionado automáticamente. La gráfica muestra todas las
+mediciones de temperatura del CSV, sin muestreo ni límite de puntos. Durante un
+registro en vivo, Plotly recibe únicamente los puntos nuevos mediante
+actualizaciones incrementales para evitar reenviar el historial completo cada
+segundo. La curva de temperatura se actualiza con las mismas filas de un segundo
+mientras el registro está activo y no depende de que una consulta puntual a
+SensorWatts termine correctamente. Si el navegador se reconecta durante un
+registro, recupera la curva completa acumulada en la Raspberry.
 
 Si cambia la dirección del medidor, se puede indicar otro endpoint:
 
