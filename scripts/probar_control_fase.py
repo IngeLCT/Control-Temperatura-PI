@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import csv
 from datetime import datetime
+import math
 from pathlib import Path
 import threading
 import time
@@ -25,6 +26,7 @@ from control_temperatura_pi.sensorwatts import SensorWattsClient
 CONTROLLED_TEST_DEFAULT_STEP_MINUTES = 3.0
 CONTROLLED_TEST_MIN_STEP_MINUTES = 0.1
 CONTROLLED_TEST_MAX_STEP_MINUTES = 60.0
+CHART_MAX_DISPLAY_POINTS = 1200
 
 
 def controlled_test_levels(
@@ -51,6 +53,60 @@ def controlled_test_duration_minutes(
 
 def controlled_test_step_seconds(step_minutes: float) -> float:
     return step_minutes * 60.0
+
+
+def chart_display_series(
+    times_s: list[float],
+    temperatures_c: list[float | None],
+    max_points: int = CHART_MAX_DISPLAY_POINTS,
+) -> tuple[list[float], list[float | None]]:
+    if len(times_s) != len(temperatures_c):
+        raise ValueError("Las series de la gráfica deben tener igual longitud")
+    if max_points < 2:
+        raise ValueError("La gráfica requiere al menos 2 puntos máximos")
+    if len(times_s) <= max_points:
+        return list(times_s), list(temperatures_c)
+
+    last_index = len(times_s) - 1
+    indexes = [
+        math.floor(position * last_index / (max_points - 1))
+        for position in range(max_points)
+    ]
+    return (
+        [times_s[index] for index in indexes],
+        [temperatures_c[index] for index in indexes],
+    )
+
+
+def load_temperature_chart_csv(
+    path: Path,
+) -> tuple[list[float], list[float | None]]:
+    times_s: list[float] = []
+    temperatures_c: list[float | None] = []
+    with path.open("r", encoding="utf-8-sig", newline="") as file_handle:
+        reader = csv.DictReader(file_handle)
+        if reader.fieldnames is None or not {
+            "Tiempo_s",
+            "Temperatura_C",
+        }.issubset(reader.fieldnames):
+            raise ValueError(
+                "El CSV no contiene Tiempo_s y Temperatura_C"
+            )
+        for row in reader:
+            try:
+                elapsed_s = float(row["Tiempo_s"])
+            except (TypeError, ValueError):
+                continue
+            raw_temperature = (row.get("Temperatura_C") or "").strip()
+            try:
+                temperature = (
+                    float(raw_temperature) if raw_temperature else None
+                )
+            except ValueError:
+                temperature = None
+            times_s.append(elapsed_s)
+            temperatures_c.append(temperature)
+    return times_s, temperatures_c
 
 
 def format_minutes(minutes: float) -> str:
@@ -331,6 +387,25 @@ def main() -> None:
     chart_lock = threading.Lock()
     chart_times_s: list[float] = []
     chart_temperatures_c: list[float | None] = []
+    chart_view = {"status": "SIN DATOS PARA MOSTRAR"}
+    if last_saved_csv_path is not None:
+        try:
+            loaded_times, loaded_temperatures = load_temperature_chart_csv(
+                last_saved_csv_path
+            )
+            chart_times_s.extend(loaded_times)
+            chart_temperatures_c.extend(loaded_temperatures)
+            chart_view["status"] = (
+                f"ÚLTIMO CSV GUARDADO · {last_saved_csv_path.name}"
+            )
+        except (OSError, ValueError) as error:
+            chart_view["status"] = (
+                f"NO FUE POSIBLE CARGAR {last_saved_csv_path.name}: "
+                f"{describe_error(error)}"
+            )
+    chart_schedule_lock = threading.Lock()
+    chart_update_pending = False
+    chart_stop = threading.Event()
     ui_clients_lock = threading.Lock()
     ui_clients: dict[str, tuple[object, object]] = {}
     ui_loop: asyncio.AbstractEventLoop | None = None
@@ -382,22 +457,62 @@ def main() -> None:
         update_pwm_view(0.0, reason)
 
     def update_connected_charts() -> None:
-        with chart_lock:
-            times = [round(value, 1) for value in chart_times_s]
-            temperatures = list(chart_temperatures_c)
-        with ui_clients_lock:
-            clients = list(ui_clients.values())
-        for client, chart in clients:
-            if not client.has_socket_connection:
-                continue
-            chart.options["xAxis"]["data"] = times
-            chart.options["series"][0]["data"] = temperatures
-            chart.update()
+        nonlocal chart_update_pending
+        try:
+            with chart_lock:
+                times, temperatures = chart_display_series(
+                    chart_times_s,
+                    chart_temperatures_c,
+                )
+                times = [round(value, 1) for value in times]
+            with ui_clients_lock:
+                clients = list(ui_clients.values())
+            for client, chart in clients:
+                if not client.has_socket_connection:
+                    continue
+                try:
+                    chart.options["xAxis"]["data"] = times
+                    chart.options["series"][0]["data"] = temperatures
+                    chart.update()
+                except Exception:
+                    continue
+        finally:
+            with chart_schedule_lock:
+                chart_update_pending = False
 
     def schedule_chart_update() -> None:
+        nonlocal chart_update_pending
         loop = ui_loop
-        if loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(update_connected_charts)
+        if loop is None or not loop.is_running():
+            return
+        with chart_schedule_lock:
+            if chart_update_pending:
+                return
+            chart_update_pending = True
+        loop.call_soon_threadsafe(update_connected_charts)
+
+    def show_last_saved_csv_on_chart() -> None:
+        path = last_saved_csv_path
+        if path is None:
+            with chart_lock:
+                chart_times_s.clear()
+                chart_temperatures_c.clear()
+            chart_view["status"] = "SIN CSV GUARDADO PARA MOSTRAR"
+            schedule_chart_update()
+            return
+        try:
+            times, temperatures = load_temperature_chart_csv(path)
+        except (OSError, ValueError) as error:
+            chart_view["status"] = (
+                f"NO FUE POSIBLE CARGAR {path.name}: "
+                f"{describe_error(error)}"
+            )
+            return
+        with chart_lock:
+            chart_times_s[:] = times
+            chart_temperatures_c[:] = temperatures
+        chart_view["status"] = f"ÚLTIMO CSV GUARDADO · {path.name}"
+        schedule_chart_update()
 
     def start_recording(prefix: str) -> bool:
         nonlocal recording, recording_started
@@ -430,9 +545,12 @@ def main() -> None:
             recording_view["status"] = (
                 f"REGISTRANDO EN PI · {recording_path.name}"
             )
-        with chart_lock:
-            chart_times_s.clear()
-            chart_temperatures_c.clear()
+            chart_view["status"] = (
+                f"GRÁFICA EN VIVO · {recording_path.name}"
+            )
+            with chart_lock:
+                chart_times_s.clear()
+                chart_temperatures_c.clear()
         schedule_chart_update()
         return True
 
@@ -460,6 +578,7 @@ def main() -> None:
                 f"CSV GUARDADO EN PI · {recording_samples} MUESTRAS · "
                 f"{saved_path.name}"
             )
+            chart_view["status"] = f"ÚLTIMO CSV GUARDADO · {saved_path.name}"
             return saved_path
 
     def append_record(reading) -> None:
@@ -505,11 +624,6 @@ def main() -> None:
                 f"REGISTRANDO EN PI · {recording_samples} MUESTRAS · "
                 f"{elapsed_s:.0f} s"
             )
-        with chart_lock:
-            chart_times_s.append(elapsed_s)
-            chart_temperatures_c.append(temperature)
-        schedule_chart_update()
-
     def read_sensorwatts() -> None:
         nonlocal sensorwatts_reading, sensorwatts_error, sensorwatts_last_read
         while not sensorwatts_stop.is_set():
@@ -537,6 +651,23 @@ def main() -> None:
                         f"ERROR SENSORWATTS: {sensorwatts_error}"
                     )
             if sensorwatts_stop.wait(1.0):
+                break
+
+    def record_temperature_chart() -> None:
+        while not chart_stop.is_set():
+            updated = False
+            with recording_lock:
+                if recording:
+                    elapsed_s = time.monotonic() - recording_started
+                    with sensor_lock:
+                        temperature = sensor_temperature_c
+                    with chart_lock:
+                        chart_times_s.append(elapsed_s)
+                        chart_temperatures_c.append(temperature)
+                    updated = True
+            if updated:
+                schedule_chart_update()
+            if chart_stop.wait(1.0):
                 break
 
     def run_controlled_test(
@@ -583,6 +714,10 @@ def main() -> None:
             controlled_test_view["button"] = "INICIAR PRUEBA CONTROLADA"
             controlled_test_view["controls_enabled"] = True
             controlled_test_view["status"] = reason
+            with recording_lock:
+                recording_active = recording
+            if not recording_active:
+                show_last_saved_csv_on_chart()
 
     sensorwatts_thread = threading.Thread(
         target=read_sensorwatts,
@@ -590,12 +725,20 @@ def main() -> None:
         daemon=True,
     )
     sensorwatts_thread.start()
+    chart_thread = threading.Thread(
+        target=record_temperature_chart,
+        name="temperature-chart-recorder",
+        daemon=True,
+    )
+    chart_thread.start()
 
     def close_hardware() -> None:
         controlled_test_cancel.set()
         if controlled_test_thread is not None:
             controlled_test_thread.join(timeout=2.0)
         disable_output("PROGRAMA CERRADO · SALIDA 0 %")
+        chart_stop.set()
+        chart_thread.join(timeout=2.0)
         finish_recording()
         pwm.close()
         sensor_stop.set()
@@ -619,6 +762,8 @@ def main() -> None:
             if active:
                 saved_path = finish_recording()
                 if saved_path is not None:
+                    if not controlled_test_running:
+                        show_last_saved_csv_on_chart()
                     ui.download.file(
                         saved_path,
                         filename=saved_path.name,
@@ -951,6 +1096,17 @@ def main() -> None:
                 minutes, step = configuration
                 full_cycle = bool(full_cycle_checkbox.value)
 
+                with recording_lock:
+                    recording_active = recording
+                if not recording_active:
+                    with chart_lock:
+                        chart_times_s.clear()
+                        chart_temperatures_c.clear()
+                    chart_view["status"] = (
+                        "PRUEBA EN CURSO · INICIA REGISTRO CSV PARA GRAFICAR"
+                    )
+                    schedule_chart_update()
+
                 enabled = True
                 set_output(0.0, "PRUEBA CONTROLADA INICIANDO")
                 controlled_test_running = True
@@ -1096,8 +1252,11 @@ def main() -> None:
         active_pwm_card.move(main_cards)
 
         with chart_lock:
-            initial_times = [round(value, 1) for value in chart_times_s]
-            initial_temperatures = list(chart_temperatures_c)
+            initial_times, initial_temperatures = chart_display_series(
+                chart_times_s,
+                chart_temperatures_c,
+            )
+            initial_times = [round(value, 1) for value in initial_times]
         chart_options = {
             "animation": False,
             "title": {"text": "Temperatura vs tiempo"},
@@ -1130,8 +1289,9 @@ def main() -> None:
             temperature_chart = ui.echart(chart_options).classes(
                 "w-full h-96"
             )
-            ui.label(
-                "La gráfica comienza y se limpia al iniciar un registro CSV."
+            ui.label().bind_text_from(
+                chart_view,
+                "status",
             ).classes("text-caption text-grey-7")
         chart_card.move(main_cards)
         controls_card.move()

@@ -202,7 +202,13 @@ La pantalla agrupa temperatura, voltaje, corriente y potencia activa en una
 tarjeta superior. Debajo aparecen lado a lado el control PWM y la gráfica
 `Temperatura vs tiempo`. La tarjeta con los controles de sensores, tiempos,
 paso PWM, prueba controlada y CSV queda debajo de ambos. La gráfica se limpia
-y comienza solo cuando inicia un registro CSV.
+y comienza en vivo cuando inicia un registro CSV. Cuando no hay una prueba ni
+un registro en curso, carga automáticamente `Tiempo_s` y `Temperatura_C` del
+último CSV guardado. Para mantener fluida la interfaz durante registros largos,
+la gráfica limita mediante muestreo la cantidad de puntos enviados al navegador;
+el CSV conserva todas las muestras sin recortes. La curva de temperatura se
+actualiza cada segundo mientras el registro está activo y no depende de que una
+consulta puntual a SensorWatts termine correctamente.
 
 Si cambia la dirección del medidor, se puede indicar otro endpoint:
 
