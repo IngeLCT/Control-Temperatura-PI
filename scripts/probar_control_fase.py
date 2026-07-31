@@ -64,12 +64,52 @@ def chart_display_series(
     return list(times_s), list(temperatures_c)
 
 
+def format_elapsed_mm_ss(seconds: float) -> str:
+    total_seconds = max(0, int(seconds + 0.5))
+    minutes, remaining_seconds = divmod(total_seconds, 60)
+    return f"{minutes:02d}:{remaining_seconds:02d}"
+
+
+def elapsed_time_axis_ticks(
+    times_s: list[float],
+    max_ticks: int = 9,
+) -> tuple[list[float], list[str]]:
+    if max_ticks < 2:
+        raise ValueError("El eje de tiempo requiere al menos dos marcas")
+    if not times_s:
+        return [0.0], ["00:00"]
+    maximum = max(0.0, max(times_s))
+    if maximum == 0:
+        return [0.0], ["00:00"]
+    target_step = maximum / (max_ticks - 1)
+    preferred_steps = (
+        1, 2, 5, 10, 15, 30,
+        60, 120, 300, 600, 900, 1800,
+        3600, 7200, 14400, 21600, 43200, 86400,
+    )
+    step = next(
+        (candidate for candidate in preferred_steps if candidate >= target_step),
+        max(1, int(target_step + 0.999)),
+    )
+    values = [float(value) for value in range(0, int(maximum) + 1, step)]
+    if not values:
+        values = [0.0]
+    if (
+        maximum - values[-1] >= step * 0.25
+        and format_elapsed_mm_ss(maximum)
+        != format_elapsed_mm_ss(values[-1])
+    ):
+        values.append(maximum)
+    return values, [format_elapsed_mm_ss(value) for value in values]
+
+
 def temperature_plotly_figure(
     times_s: list[float],
     temperatures_c: list[float | None],
     session_revision: int = 0,
 ) -> dict[str, object]:
     """Build the declarative Plotly figure used by every connected client."""
+    tick_values, tick_labels = elapsed_time_axis_ticks(times_s)
     return {
         "data": [
             {
@@ -78,10 +118,13 @@ def temperature_plotly_figure(
                 "name": "Temperatura",
                 "x": times_s,
                 "y": temperatures_c,
+                "customdata": [
+                    format_elapsed_mm_ss(value) for value in times_s
+                ],
                 "connectgaps": False,
                 "line": {"color": "#e53935", "width": 2},
                 "hovertemplate": (
-                    "Tiempo: %{x:.1f} s<br>"
+                    "Tiempo: %{customdata}<br>"
                     "Temperatura: %{y:.2f} °C<extra></extra>"
                 ),
             }
@@ -91,8 +134,11 @@ def temperature_plotly_figure(
             "title": {"text": "Temperatura vs tiempo", "x": 0.5},
             "margin": {"l": 65, "r": 25, "t": 55, "b": 65},
             "xaxis": {
-                "title": "Tiempo (s)",
+                "title": "Tiempo (MM:SS)",
                 "type": "linear",
+                "tickmode": "array",
+                "tickvals": tick_values,
+                "ticktext": tick_labels,
                 "rangeslider": {"visible": True, "thickness": 0.08},
             },
             "yaxis": {
@@ -673,13 +719,26 @@ def main() -> None:
                             )
                         chart.update_figure(full_figure)
                     elif rendered_count < len(times):
+                        added_times = times[rendered_count:]
                         chart.run_plot_method(
                             "extendTraces",
                             {
-                                "x": [times[rendered_count:]],
+                                "x": [added_times],
                                 "y": [temperatures[rendered_count:]],
+                                "customdata": [[
+                                    format_elapsed_mm_ss(value)
+                                    for value in added_times
+                                ]],
                             },
                             [0],
+                        )
+                        tick_values, tick_labels = elapsed_time_axis_ticks(times)
+                        chart.run_plot_method(
+                            "relayout",
+                            {
+                                "xaxis.tickvals": tick_values,
+                                "xaxis.ticktext": tick_labels,
+                            },
                         )
                     else:
                         continue

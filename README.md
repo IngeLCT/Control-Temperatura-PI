@@ -236,6 +236,10 @@ segundo. La curva de temperatura se actualiza con las mismas filas de un segundo
 mientras el registro está activo y no depende de que una consulta puntual a
 SensorWatts termine correctamente. Si el navegador se reconecta durante un
 registro, recupera la curva completa acumulada en la Raspberry.
+El eje horizontal y el cursor de Plotly presentan el tiempo transcurrido en
+formato `MM:SS`; por ejemplo, 1000 segundos se muestran como `16:40`. El CSV
+conserva `Tiempo_s` como número para no perder precisión ni dificultar el
+análisis posterior.
 
 Si cambia la dirección del medidor, se puede indicar otro endpoint:
 

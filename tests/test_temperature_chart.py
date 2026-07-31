@@ -5,6 +5,8 @@ from pathlib import Path
 
 from scripts.probar_control_fase import (
     chart_display_series,
+    elapsed_time_axis_ticks,
+    format_elapsed_mm_ss,
     list_saved_csv_paths,
     load_temperature_chart_csv,
     resolve_saved_csv_path,
@@ -15,6 +17,19 @@ from control_temperatura_pi.sensorwatts import SensorWattsReading
 
 
 class TemperatureChartTests(unittest.TestCase):
+    def test_formats_elapsed_seconds_as_unbounded_minutes_and_seconds(self) -> None:
+        self.assertEqual(format_elapsed_mm_ss(0.0), "00:00")
+        self.assertEqual(format_elapsed_mm_ss(65.0), "01:05")
+        self.assertEqual(format_elapsed_mm_ss(1000.0), "16:40")
+        self.assertEqual(format_elapsed_mm_ss(3661.0), "61:01")
+
+    def test_time_axis_uses_mm_ss_labels(self) -> None:
+        values, labels = elapsed_time_axis_ticks([0.0, 500.0, 1000.0])
+
+        self.assertEqual(len(values), len(labels))
+        self.assertEqual(labels[0], "00:00")
+        self.assertEqual(labels[-1], "16:40")
+
     def test_lists_saved_csv_files_newest_first_and_resolves_safely(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             csv_dir = Path(directory)
@@ -52,6 +67,11 @@ class TemperatureChartTests(unittest.TestCase):
         self.assertEqual(trace["x"], [0.0, 1.0])
         self.assertEqual(trace["y"], [24.5, 25.0])
         self.assertFalse(trace["connectgaps"])
+        self.assertEqual(trace["customdata"], ["00:00", "00:01"])
+        self.assertEqual(
+            figure["layout"]["xaxis"]["title"],
+            "Tiempo (MM:SS)",
+        )
         self.assertEqual(
             figure["layout"]["uirevision"],
             "temperature-session-3",
