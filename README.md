@@ -205,7 +205,10 @@ Fuera de la prueba controlada, la salida manual conserva el apagado de seguridad
 cuando se desconecta el último navegador.
 
 La pantalla agrupa temperatura, voltaje, corriente y potencia activa en una
-tarjeta superior. Debajo aparecen lado a lado el control PWM y la gráfica
+tarjeta superior. Esa misma tarjeta muestra el paso actual respecto del total,
+el tiempo restante del paso en curso y la cantidad de filas escritas en el CSV.
+Los tres indicadores usan el estado de la Raspberry y se recuperan al volver a
+conectar el navegador. Debajo aparecen lado a lado el control PWM y la gráfica
 `Temperatura vs tiempo`. La tarjeta con los controles de sensores, tiempos,
 paso PWM, prueba controlada y CSV queda debajo de ambos. La gráfica se limpia
 y comienza en vivo cuando inicia un registro CSV. Cuando no hay una prueba ni

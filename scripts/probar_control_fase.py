@@ -392,6 +392,7 @@ def main() -> None:
         "button": "INICIAR REGISTRO CSV",
         "manual_enabled": True,
         "has_saved_file": last_saved_csv_path is not None,
+        "samples": "0",
     }
     controlled_test_running = False
     controlled_test_thread = None
@@ -405,6 +406,8 @@ def main() -> None:
         ),
         "button": "INICIAR PRUEBA CONTROLADA",
         "controls_enabled": True,
+        "step": "0 / 19",
+        "remaining": "-- s",
     }
     chart_lock = threading.Lock()
     chart_times_s: list[float] = []
@@ -417,6 +420,7 @@ def main() -> None:
             )
             chart_times_s.extend(loaded_times)
             chart_temperatures_c.extend(loaded_temperatures)
+            recording_view["samples"] = str(len(loaded_times))
             chart_view["status"] = (
                 f"ÚLTIMO CSV GUARDADO · {last_saved_csv_path.name}"
             )
@@ -563,6 +567,7 @@ def main() -> None:
             recording_started = time.monotonic()
             recording_samples = 0
             recording = True
+            recording_view["samples"] = "0"
             recording_view["button"] = "DETENER Y DESCARGAR CSV"
             recording_view["status"] = (
                 f"REGISTRANDO EN PI · {recording_path.name}"
@@ -655,6 +660,7 @@ def main() -> None:
                 )
                 return
             recording_samples += 1
+            recording_view["samples"] = str(recording_samples)
             recording_view["status"] = (
                 f"REGISTRANDO EN PI · {recording_samples} MUESTRAS · "
                 f"{elapsed_s:.0f} s"
@@ -731,6 +737,7 @@ def main() -> None:
             for stage, level in enumerate(levels, start=1):
                 if controlled_test_cancel.is_set():
                     break
+                controlled_test_view["step"] = f"{stage} / {len(levels)}"
                 set_output(
                     float(level),
                     status=f"PRUEBA CONTROLADA · PWM {level} %",
@@ -745,6 +752,7 @@ def main() -> None:
                         f"PASO {stage}/{len(levels)} · PWM {level} % · "
                         f"RESTAN {seconds} s"
                     )
+                    controlled_test_view["remaining"] = f"{seconds} s"
                     if controlled_test_cancel.wait(min(1.0, remaining)):
                         break
             else:
@@ -762,6 +770,11 @@ def main() -> None:
             controlled_test_view["button"] = "INICIAR PRUEBA CONTROLADA"
             controlled_test_view["controls_enabled"] = True
             controlled_test_view["status"] = reason
+            controlled_test_view["remaining"] = "0 s"
+            if completed:
+                controlled_test_view["step"] = (
+                    f"{len(levels)} / {len(levels)}"
+                )
             with recording_lock:
                 recording_active = recording
             if not recording_active:
@@ -876,6 +889,24 @@ def main() -> None:
                     ui.label().bind_text_from(
                         sensorwatts_view,
                         "active_power",
+                    ).classes("text-h5")
+                with ui.column().classes("items-center"):
+                    ui.label("Paso de prueba").classes("text-caption")
+                    ui.label().bind_text_from(
+                        controlled_test_view,
+                        "step",
+                    ).classes("text-h5")
+                with ui.column().classes("items-center"):
+                    ui.label("Tiempo restante").classes("text-caption")
+                    ui.label().bind_text_from(
+                        controlled_test_view,
+                        "remaining",
+                    ).classes("text-h5")
+                with ui.column().classes("items-center"):
+                    ui.label("Registros CSV").classes("text-caption")
+                    ui.label().bind_text_from(
+                        recording_view,
+                        "samples",
                     ).classes("text-h5")
             ui.label().bind_text_from(
                 sensor_view,
@@ -1079,6 +1110,8 @@ def main() -> None:
                     f"PRUEBA DETENIDA · {route} · {stages} PASOS · "
                     f"{format_minutes(total)} MIN"
                 )
+                controlled_test_view["step"] = f"0 / {stages}"
+                controlled_test_view["remaining"] = "-- s"
 
             controlled_step_input.on_value_change(
                 lambda: update_controlled_summary()
@@ -1111,6 +1144,7 @@ def main() -> None:
                     controlled_test_view["status"] = (
                         "CANCELACIÓN SOLICITADA · FORZANDO SALIDA 0 %"
                     )
+                    controlled_test_view["remaining"] = "0 s"
                     disable_output("CANCELACIÓN SOLICITADA · SALIDA 0 %")
                     return
 
@@ -1154,6 +1188,10 @@ def main() -> None:
                 )
                 controlled_test_view["controls_enabled"] = False
                 stages = len(controlled_test_levels(step, full_cycle))
+                controlled_test_view["step"] = f"0 / {stages}"
+                controlled_test_view["remaining"] = (
+                    f"{int(round(controlled_test_step_seconds(minutes)))} s"
+                )
                 total = controlled_test_duration_minutes(
                     minutes,
                     step,
